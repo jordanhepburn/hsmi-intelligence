@@ -1,0 +1,33 @@
+name: HSMI Pricing Engine
+
+on:
+  schedule:
+    # 8:00 pm UTC = 6:00 am AEST (UTC+10) — runs every day
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+    # Allows manual trigger from the GitHub Actions UI
+
+jobs:
+  price:
+    name: Run Pricing Engine
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pricing engine
+        env:
+          CLOUDBEDS_API_KEY: ${{ secrets.CLOUDBEDS_API_KEY }}
+          CLOUDBEDS_PROPERTY_ID: ${{ secrets.CLOUDBEDS_PROPERTY_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python pricing_engine/pricing_engine.py
