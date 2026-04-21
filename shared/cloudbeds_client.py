@@ -136,7 +136,7 @@ class CloudbedsClient:
         return self._request("GET", endpoint, params=params or {})
 
     def _post(self, endpoint: str, data: Optional[dict] = None) -> dict:
-        return self._request("POST", endpoint, data=data or {})
+        return self._request("POST", endpoint, json=data or {})
 
     # ------------------------------------------------------------------
     # Public API methods
@@ -367,10 +367,6 @@ class CloudbedsClient:
             Raw API response (contains jobReferenceID for async tracking).
         """
         rounded_rate = round(rate)
-        logger.info(
-            "patchRate: rateID=%s date=%s rate=%s",
-            rate_id, date_str, rounded_rate,
-        )
         payload = {
             "rates": [
                 {
@@ -385,4 +381,9 @@ class CloudbedsClient:
                 }
             ]
         }
+        import json as _json
+        logger.info(
+            "patchRate request body: %s",
+            _json.dumps(payload),
+        )
         return self._post("patchRate", data=payload)
