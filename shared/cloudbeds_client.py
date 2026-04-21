@@ -272,34 +272,37 @@ class CloudbedsClient:
 
     def get_reservations(self, start_date: date, end_date: date) -> list[dict]:
         """
-        Fetch all active reservations overlapping the date range.
+        Fetch all active reservations whose checkout is on or after start_date.
+
+        Uses checkOutFrom/checkOutTo so that guests already checked in (whose
+        arrival predates start_date) are included in occupancy counts.
+
+        The getReservations summary endpoint does not include roomTypeID; this
+        method calls getReservation (singular) for each result to obtain the
+        room assignment from the ``assigned`` array.
 
         Handles pagination automatically. Filters out cancelled and no-show
         reservations.
-
-        Parameters
-        ----------
-        start_date : date
-        end_date : date
 
         Returns
         -------
         list[dict]
             Each dict has keys: reservationID, startDate, endDate,
-            roomTypeID, status.
+            roomTypeID, status.  Multi-room reservations produce one entry
+            per room assignment.
         """
-        logger.info("Fetching reservations %s→%s", start_date, end_date)
-        reservations: list[dict] = []
+        logger.info("Fetching reservations checkOutFrom=%s checkOutTo=%s", start_date, end_date)
+        summaries: list[dict] = []
         page_num = 1
 
         while True:
             params = {
-                "startDate": start_date.strftime("%Y-%m-%d"),
-                "endDate": end_date.strftime("%Y-%m-%d"),
+                "checkOutFrom": start_date.strftime("%Y-%m-%d"),
+                "checkOutTo": end_date.strftime("%Y-%m-%d"),
                 "pageNum": page_num,
             }
             response = self._get("getReservations", params=params)
-            data = response.get("data", response)
+            data = response.get("data", [])
             items = data if isinstance(data, list) else data.get("reservations", [])
 
             if not items:
@@ -309,34 +312,62 @@ class CloudbedsClient:
                 status = (
                     res.get("status") or res.get("reservationStatus") or ""
                 ).lower().replace(" ", "_")
-
                 if status in CANCELLED_STATUSES:
                     logger.debug(
-                        "Skipping reservation %s with status '%s'",
-                        res.get("reservationID"),
-                        status,
+                        "Skipping cancelled reservation %s (status=%s)",
+                        res.get("reservationID"), status,
                     )
                     continue
-
-                reservations.append(
-                    {
-                        "reservationID": str(res.get("reservationID") or res.get("id") or ""),
-                        "startDate": str(res.get("startDate") or res.get("checkIn") or ""),
-                        "endDate": str(res.get("endDate") or res.get("checkOut") or ""),
-                        "roomTypeID": str(res.get("roomTypeID") or ""),
+                res_id = str(res.get("reservationID") or "")
+                if res_id:
+                    summaries.append({
+                        "reservationID": res_id,
                         "status": status,
-                    }
-                )
+                        "startDate": str(res.get("startDate") or ""),
+                        "endDate": str(res.get("endDate") or ""),
+                    })
 
-            # Determine whether there are more pages
-            total_results = response.get("total") or response.get("totalResults") or 0
-            page_size = response.get("pageSize") or response.get("resultsPerPage") or len(items)
-            if not items or (page_size and page_num * page_size >= int(total_results)):
+            # Pagination: API returns count (this page) and total (all matching)
+            count = int(response.get("count") or len(items))
+            total = int(response.get("total") or 0)
+            if not items or (total and page_num * count >= total):
                 break
-
             page_num += 1
 
-        logger.info("Loaded %d active reservations", len(reservations))
+        logger.info(
+            "Fetched %d reservation summaries — enriching with room assignments…",
+            len(summaries),
+        )
+
+        # getReservations summary has no roomTypeID; fetch each detail to get it.
+        reservations: list[dict] = []
+        for summary in summaries:
+            res_id = summary["reservationID"]
+            try:
+                detail_resp = self._get("getReservation", params={"reservationID": res_id})
+                detail = detail_resp.get("data", detail_resp)
+                assigned = detail.get("assigned", [])
+                for room in assigned:
+                    room_type_id = str(room.get("roomTypeID") or "")
+                    if not room_type_id:
+                        continue
+                    reservations.append({
+                        "reservationID": res_id,
+                        "startDate": str(room.get("startDate") or summary["startDate"]),
+                        "endDate":   str(room.get("endDate")   or summary["endDate"]),
+                        "roomTypeID": room_type_id,
+                        "status": summary["status"],
+                    })
+            except CloudbedsAPIError as exc:
+                logger.warning(
+                    "Could not fetch room assignment for reservation %s: %s — skipping",
+                    res_id, exc,
+                )
+
+        logger.info(
+            "Loaded %d active room assignments from %d reservations",
+            len(reservations), len(summaries),
+        )
         return reservations
 
     def patch_rate(

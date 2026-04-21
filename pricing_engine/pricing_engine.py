@@ -285,7 +285,8 @@ class PricingEngine:
         dict
             ``{date_str: {room_type_code: occupancy_pct}}``
         """
-        logger.info("Step 3: Calculating occupancy over next %d days", LOOKAHEAD_DAYS)
+        lookahead = (self.end_date - self.today).days
+        logger.info("Step 3: Calculating occupancy over next %d days", lookahead)
         reservations = self.client.get_reservations(self.today, self.end_date)
 
         # Build reverse map: room_type_id → code
@@ -350,50 +351,79 @@ class PricingEngine:
 
             for code, cfg in self.room_types.items():
                 if code not in self._room_type_map:
-                    current += timedelta(days=1)
                     continue
 
                 occ_pct = self._occupancy.get(d_str, {}).get(code, 0.0)
-                base_rate = cfg["weekend"] if is_weekend else cfg["midweek"]
                 floor_ = cfg["floor"]
                 ceiling_ = cfg["ceiling"]
 
-                # ---- Priority 1: Peak date (public holiday or school holiday) ----
+                # ---- Priority 1: Peak date — always peak rate, ignore occ ----
                 if is_peak_date(current):
                     rate = cfg["peak"]
-                    reason = "peak date (holiday/school holiday) — min 2-night stay recommended"
+                    reason = "peak date"
 
-                # ---- Priority 2: Very high occupancy (> 90%) ----
-                elif occ_pct > 0.90:
-                    rate = base_rate * 1.25
-                    reason = "occ >90% +25% — min 2-night stay recommended"
-
-                # ---- Priority 3: Weekend ----
+                # ---- Weekend (Fri/Sat/Sun) ----
                 elif is_weekend:
-                    if days_out < 7 and occ_pct > 0.80:
-                        rate = cfg["weekend"] * 1.20
-                        reason = "weekend last-minute high occ +20%"
-                    elif days_out >= 7 and occ_pct > 0.70:
-                        rate = cfg["weekend"] * 1.10
-                        reason = "weekend advance high occ +10%"
-                    else:
+                    if days_out >= 15:
                         rate = cfg["weekend"]
-                        reason = "weekend base"
+                        reason = "weekend 15+ days — hold base"
+                    elif days_out >= 8:                        # 8–14 days out
+                        if occ_pct > 0.50:
+                            rate = cfg["weekend"] * 1.10
+                            reason = "weekend 8-14d >50% occ +10%"
+                        else:
+                            rate = cfg["weekend"]
+                            reason = "weekend 8-14d hold base"
+                    elif days_out >= 2:                        # 2–7 days out
+                        if occ_pct > 0.80:
+                            rate = cfg["weekend"] * 1.25
+                            reason = "weekend 2-7d >80% occ +25%"
+                        elif occ_pct > 0.60:
+                            rate = cfg["weekend"] * 1.15
+                            reason = "weekend 2-7d >60% occ +15%"
+                        elif occ_pct < 0.30:
+                            rate = cfg["weekend"] * 0.92
+                            reason = "weekend 2-7d <30% occ -8%"
+                        else:
+                            rate = cfg["weekend"]
+                            reason = "weekend 2-7d hold base"
+                    else:                                       # same day / next day
+                        if occ_pct > 0.70:
+                            rate = cfg["weekend"] * 1.20
+                            reason = "weekend last-minute >70% occ +20%"
+                        elif occ_pct < 0.40:
+                            rate = cfg["weekend"] * 0.88
+                            reason = "weekend last-minute <40% occ -12%"
+                        else:
+                            rate = cfg["weekend"]
+                            reason = "weekend last-minute hold base"
 
-                # ---- Priority 4: Midweek ----
+                # ---- Midweek (Mon–Thu) ----
                 else:
-                    if days_out < 7 and occ_pct < 0.25:
-                        rate = cfg["midweek"] * 0.85
-                        reason = "midweek last-minute low occ -15%"
-                    elif 7 <= days_out < 14 and occ_pct < 0.30:
-                        rate = cfg["midweek"] * 0.90
-                        reason = "midweek advance low occ -10%"
-                    elif days_out >= 14 and occ_pct < 0.40:
+                    if days_out >= 14:
                         rate = cfg["midweek"]
-                        reason = "midweek advance low occ (no discount)"
-                    else:
-                        rate = cfg["midweek"]
-                        reason = "midweek base"
+                        reason = "midweek 14+ days — hold base"
+                    elif days_out >= 7:                        # 7–13 days out
+                        if occ_pct < 0.25:
+                            rate = cfg["midweek"] * 0.90
+                            reason = "midweek 7-14d <25% occ -10%"
+                        else:
+                            rate = cfg["midweek"]
+                            reason = "midweek 7-14d hold base"
+                    elif days_out >= 2:                        # 2–6 days out
+                        if occ_pct < 0.20:
+                            rate = cfg["midweek"] * 0.85
+                            reason = "midweek 2-7d <20% occ -15%"
+                        else:
+                            rate = cfg["midweek"]
+                            reason = "midweek 2-7d hold base"
+                    else:                                       # same day / next day
+                        if occ_pct < 0.30:
+                            rate = cfg["midweek"] * 0.82
+                            reason = "midweek same-day <30% occ -18%"
+                        else:
+                            rate = cfg["midweek"]
+                            reason = "midweek same-day hold base"
 
                 # Clamp to [floor, ceiling]
                 rate = max(floor_, min(ceiling_, round(rate)))
@@ -563,20 +593,27 @@ def _rate_reason(
 
     if is_peak_date(d):
         return "peak date"
-    if occ_pct > 0.90:
-        return "occ >90%"
     if is_weekend:
-        if days_out < 7 and occ_pct > 0.80:
-            return "weekend last-minute high occ"
-        if days_out >= 7 and occ_pct > 0.70:
-            return "weekend advance high occ"
-        return "weekend base"
+        if days_out >= 15:
+            return "weekend 15+ days base"
+        if days_out >= 8:
+            return "weekend 8-14d >50% occ +10%" if occ_pct > 0.50 else "weekend 8-14d base"
+        if days_out >= 2:
+            if occ_pct > 0.80: return "weekend 2-7d >80% occ +25%"
+            if occ_pct > 0.60: return "weekend 2-7d >60% occ +15%"
+            if occ_pct < 0.30: return "weekend 2-7d <30% occ -8%"
+            return "weekend 2-7d base"
+        if occ_pct > 0.70: return "weekend last-minute >70% occ +20%"
+        if occ_pct < 0.40: return "weekend last-minute <40% occ -12%"
+        return "weekend last-minute base"
     # Midweek
-    if days_out < 7 and occ_pct < 0.25:
-        return "midweek last-minute low occ"
-    if 7 <= days_out < 14 and occ_pct < 0.30:
-        return "midweek advance low occ"
-    return "midweek base"
+    if days_out >= 14:
+        return "midweek 14+ days base"
+    if days_out >= 7:
+        return "midweek 7-14d <25% occ -10%" if occ_pct < 0.25 else "midweek 7-14d base"
+    if days_out >= 2:
+        return "midweek 2-7d <20% occ -15%" if occ_pct < 0.20 else "midweek 2-7d base"
+    return "midweek same-day <30% occ -18%" if occ_pct < 0.30 else "midweek same-day base"
 
 
 # ---------------------------------------------------------------------------
