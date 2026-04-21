@@ -76,7 +76,19 @@ class PricingEngine:
         self.client = CloudbedsClient(api_key=api_key, property_id=property_id)
         self.slack_webhook = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
         self.today = date.today()
-        self.end_date = self.today + timedelta(days=LOOKAHEAD_DAYS)
+
+        # Daily base run at 20:00 UTC (6am AEST) uses full 60-day window.
+        # All other runs (hourly) use a 14-day window to stay fast.
+        utc_hour = datetime.utcnow().hour
+        is_base_run = (utc_hour == 20)
+        lookahead = LOOKAHEAD_DAYS if is_base_run else 14
+        self.end_date = self.today + timedelta(days=lookahead)
+        logger.info(
+            "Run type: %s (UTC hour=%d) — lookahead=%d days",
+            "DAILY BASE" if is_base_run else "HOURLY",
+            utc_hour,
+            lookahead,
+        )
 
         # Load pricing tiers from Notion (falls back to config.py if unavailable)
         self.room_types = load_pricing_tiers()
