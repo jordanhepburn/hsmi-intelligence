@@ -161,7 +161,9 @@ class PricingEngine:
         self._occupancy: dict[str, dict[str, float]] = {}  # date_str → {code: occ_pct}
         self._target_rates: dict[str, dict[str, float]] = {}  # date_str → {code: rate}
         self._current_rates: dict[str, dict[str, float]] = {}  # date_str → {code: rate}
-        self._updates_pushed: list[str] = []
+        self._rate_reasons: dict[str, dict[str, str]] = {}    # date_str → {code: bracket_label}
+        # Each entry: {code, date, old_rate, new_rate, direction, bracket}
+        self._updates_pushed: list[dict] = []
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -431,6 +433,7 @@ class PricingEngine:
                 if is_weekend and not is_peak_date(current) and days_out >= 15:
                     rate = max(floor_, min(ceiling_, round(cfg["weekend"])))
                     self._target_rates[d_str][code] = rate
+                    self._rate_reasons.setdefault(d_str, {})[code] = "weekend hold"
                     logger.debug(
                         "%s %s: $%.0f weekend base (15+ days out — hold, no occ bracket)",
                         code, d_str, rate,
@@ -449,9 +452,11 @@ class PricingEngine:
                             base = cfg["peak"] if is_peak_date(current) else (cfg["weekend"] if is_weekend else cfg["midweek"])
                             rate = max(floor_, min(ceiling_, round(base)))
                             reason = "EVENING: occ >85% — hold base (live rate unavailable)"
+                        self._rate_reasons.setdefault(d_str, {})[code] = "EVENING hold"
                     else:
                         rate = floor_
-                        reason = f"EVENING: occ ≤85% — floor"
+                        reason = "EVENING: occ ≤85% — floor"
+                        self._rate_reasons.setdefault(d_str, {})[code] = "EVENING floor"
                     self._target_rates[d_str][code] = rate
                     logger.info(
                         "%s %s: $%.0f (%.0f%% occ | %s)",
@@ -499,6 +504,7 @@ class PricingEngine:
                     clamp_note,
                 )
 
+                self._rate_reasons.setdefault(d_str, {})[code] = f"{bracket_label} occ"
                 self._target_rates[d_str][code] = final_rate
 
             current += timedelta(days=1)
@@ -561,9 +567,14 @@ class PricingEngine:
                                 date_str=d_str,
                                 rate=new_rate,
                             )
-                            self._updates_pushed.append(
-                                f"{code} {d_str}: {direction} → ${new_rate:.0f}"
-                            )
+                            self._updates_pushed.append({
+                                "code":      code,
+                                "date":      current,
+                                "old_rate":  current_rate,
+                                "new_rate":  new_rate,
+                                "direction": direction,
+                                "bracket":   self._rate_reasons.get(d_str, {}).get(code, ""),
+                            })
                         except CloudbedsAPIError as exc:
                             logger.error("Failed to push rate for %s on %s: %s", code, d_str, exc)
                 else:
@@ -589,24 +600,45 @@ class PricingEngine:
             logger.info("No rate changes required — skipping Slack notification")
             return
 
-        summary_lines = "\n".join(f"  • {line}" for line in self._updates_pushed[:50])
-        if n > 50:
-            summary_lines += f"\n  … and {n - 50} more"
+        # Sort by date ascending, then room type code
+        sorted_updates = sorted(self._updates_pushed, key=lambda u: (u["date"], u["code"]))
+        shown = sorted_updates[:20]
+
+        lines = []
+        for u in shown:
+            arrow  = "↑" if u["direction"] in ("raised", "set") else "↓"
+            new    = u["new_rate"]
+            old    = u["old_rate"]
+            date_s = u["date"].strftime("%a %d %b")
+
+            if old is not None and old > 0:
+                pct    = (new - old) / old * 100
+                change = f"${old:.0f} → ${new:.0f} ({pct:+.0f}%)"
+            else:
+                change = f"${new:.0f} (new)"
+
+            bracket = u["bracket"]
+            suffix  = f" — {bracket}" if bracket else ""
+            lines.append(f"{arrow} {u['code']} {date_s}: {change}{suffix}")
+
+        summary = "\n".join(lines)
+        if n > 20:
+            summary += f"\n… and {n - 20} more"
 
         enabled = sum(1 for rt in self._room_type_map.values() if rt.get("rate_id"))
-        total = len(self._room_type_map)
-        if enabled:
-            push_status = f"✅ RATE PUSH ENABLED: {enabled}/{total} room types have rateIDs"
-        else:
-            push_status = f"⛔ RATE PUSH DISABLED: no rateIDs found — no updates were pushed"
+        total   = len(self._room_type_map)
+        push_status = (
+            f"✅ {enabled}/{total} room types active"
+            if enabled
+            else "⛔ No rateIDs — no updates pushed"
+        )
 
         payload = {
             "text": (
                 f"*HSMI Pricing Engine — {self.today}*\n"
-                f"{n} rate update{'s' if n != 1 else ''} pushed\n"
-                f"{summary_lines}\n"
-                f"{push_status}\n"
-                f"📋 To adjust pricing tiers: https://www.notion.so/349c905ced6b81d1be30d33aa3cf15eb"
+                f"_{n} rate update{'s' if n != 1 else ''} pushed — {push_status}_\n\n"
+                f"{summary}\n\n"
+                f"📋 https://www.notion.so/349c905ced6b81d1be30d33aa3cf15eb"
             )
         }
 
