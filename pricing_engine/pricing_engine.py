@@ -615,11 +615,12 @@ class PricingEngine:
 
         n = len(self._updates_pushed)
         if n == 0:
-            summary_lines = "_No rate changes required today._"
-        else:
-            summary_lines = "\n".join(f"  • {line}" for line in self._updates_pushed[:50])
-            if n > 50:
-                summary_lines += f"\n  … and {n - 50} more"
+            logger.info("No rate changes required — skipping Slack notification")
+            return
+
+        summary_lines = "\n".join(f"  • {line}" for line in self._updates_pushed[:50])
+        if n > 50:
+            summary_lines += f"\n  … and {n - 50} more"
 
         enabled = sum(1 for rt in self._room_type_map.values() if rt.get("rate_id"))
         total = len(self._room_type_map)
