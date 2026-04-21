@@ -77,7 +77,7 @@ class PricingEngine:
         self.end_date = self.today + timedelta(days=LOOKAHEAD_DAYS)
 
         # Populated during run()
-        self._room_type_map: dict[str, dict] = {}   # code → {id, total_rooms}
+        self._room_type_map: dict[str, dict] = {}   # code → {id, total_rooms, rate_id}
         self._rate_plan_id: str = ""
         self._occupancy: dict[str, dict[str, float]] = {}  # date_str → {code: occ_pct}
         self._target_rates: dict[str, dict[str, float]] = {}  # date_str → {code: rate}
@@ -150,39 +150,118 @@ class PricingEngine:
 
     def _load_rate_plans(self) -> None:
         """
-        Fetch rate plans and select the first active standard / BAR plan.
+        Fetch rate plans, log all of them, select the best match, and extract
+        per-room-type rateIDs needed for patchRate calls.
         """
         logger.info("Step 2: Loading rate plans")
         response = self.client.get_rate_plans(self.today, self.end_date)
         data = response.get("data", response)
-        plans = data if isinstance(data, list) else data.get("ratePlans", [])
 
-        for plan in plans:
-            name: str = (plan.get("ratePlanName") or plan.get("name") or "").lower()
-            status: str = (plan.get("status") or "active").lower()
-            plan_id: str = str(plan.get("ratePlanID") or plan.get("id") or "")
+        # getRatePlans may return a list or a dict keyed by ratePlanID
+        if isinstance(data, list):
+            plans = data
+        elif isinstance(data, dict):
+            raw = data.get("ratePlans", data)
+            plans = list(raw.values()) if isinstance(raw, dict) else raw
+        else:
+            plans = []
 
+        if not plans:
+            logger.critical("getRatePlans returned no plans — cannot continue")
+            sys.exit(1)
+
+        # Log every plan so we can confirm the right one is selected
+        logger.info("getRatePlans returned %d plan(s):", len(plans))
+        for p in plans:
+            p_id   = str(p.get("ratePlanID") or p.get("id") or "?")
+            p_name = p.get("ratePlanNamePrivate") or p.get("ratePlanName") or p.get("name") or "?"
+            p_pub  = p.get("ratePlanNamePublic") or ""
+            p_stat = p.get("status") or "?"
+            logger.info(
+                "  id=%-20s  private='%s'  public='%s'  status=%s",
+                p_id, p_name, p_pub, p_stat,
+            )
+
+        # Select rate plan: prefer BAR / standard / best-available, else first active
+        selected_plan: dict | None = None
+        for p in plans:
+            name_str = " ".join([
+                p.get("ratePlanNamePrivate") or "",
+                p.get("ratePlanNamePublic") or "",
+                p.get("ratePlanName") or "",
+            ]).lower()
+            status = str(p.get("status") or "active").lower()
             if status not in ("active", "1", "true", "enabled"):
                 continue
+            if any(kw in name_str for kw in ("bar", "standard", "best available", "rack")):
+                selected_plan = p
+                break
 
-            if any(kw in name for kw in ("bar", "standard", "best available", "rack")):
-                self._rate_plan_id = plan_id
-                logger.info("Selected rate plan: '%s' (id=%s)", name, plan_id)
-                return
+        if selected_plan is None:
+            # Fallback: first active plan
+            for p in plans:
+                status = str(p.get("status") or "active").lower()
+                if status in ("active", "1", "true", "enabled"):
+                    selected_plan = p
+                    logger.warning("No BAR/standard plan found — using first active plan")
+                    break
 
-        # Fallback: just pick the first active plan
-        for plan in plans:
-            status = (plan.get("status") or "active").lower()
-            plan_id = str(plan.get("ratePlanID") or plan.get("id") or "")
-            if status in ("active", "1", "true", "enabled") and plan_id:
-                self._rate_plan_id = plan_id
+        if selected_plan is None:
+            logger.critical("No active rate plans found — cannot continue")
+            sys.exit(1)
+
+        self._rate_plan_id = str(
+            selected_plan.get("ratePlanID") or selected_plan.get("id") or ""
+        )
+        plan_name = (
+            selected_plan.get("ratePlanNamePrivate")
+            or selected_plan.get("ratePlanName")
+            or selected_plan.get("name")
+            or "?"
+        )
+        logger.info("Selected rate plan: '%s' (id=%s)", plan_name, self._rate_plan_id)
+
+        # Extract per-room-type rateIDs from the selected plan.
+        # These are required for patchRate — the API uses rateID, not roomTypeID.
+        # rateIDs are nested inside the plan under various key names depending on
+        # API version; log what we find so any format differences are visible.
+        room_rates = (
+            selected_plan.get("roomRates")
+            or selected_plan.get("roomTypes")
+            or selected_plan.get("rates")
+            or []
+        )
+        if isinstance(room_rates, dict):
+            room_rates = list(room_rates.values())
+
+        rate_id_by_room_type_id: dict[str, str] = {}
+        for rr in room_rates:
+            if not isinstance(rr, dict):
+                continue
+            rt_id  = str(rr.get("roomTypeID") or rr.get("roomType") or "")
+            rate_id = str(rr.get("rateID") or rr.get("id") or "")
+            if rt_id and rate_id:
+                rate_id_by_room_type_id[rt_id] = rate_id
+                logger.info("  rateID mapping: roomTypeID=%s → rateID=%s", rt_id, rate_id)
+
+        if not rate_id_by_room_type_id:
+            logger.warning(
+                "No rateID entries found inside the selected rate plan — "
+                "patchRate calls will be skipped. Full plan data: %s",
+                selected_plan,
+            )
+
+        # Store rateID on each room type entry
+        for code, rt in self._room_type_map.items():
+            rate_id = rate_id_by_room_type_id.get(rt["id"], "")
+            rt["rate_id"] = rate_id
+            if rate_id:
+                logger.info("  %s: rateID=%s", code, rate_id)
+            else:
                 logger.warning(
-                    "No BAR/standard plan found — falling back to first active plan id=%s", plan_id
+                    "  %s (id=%s): no rateID found — rate updates for this type will be skipped",
+                    code, rt["id"],
                 )
-                return
-
-        logger.critical("No active rate plans found — cannot continue")
-        sys.exit(1)
 
     # ------------------------------------------------------------------
     # Step 3: Calculate occupancy
@@ -335,9 +414,8 @@ class PricingEngine:
         logger.info("Step 5: Fetching current rates from Cloudbeds")
         for code, rt in self._room_type_map.items():
             try:
-                rates = self.client.get_rates(
+                rates = self.client.get_rate(
                     room_type_id=rt["id"],
-                    rate_plan_id=self._rate_plan_id,
                     start_date=self.today,
                     end_date=self.end_date,
                 )
@@ -367,7 +445,6 @@ class PricingEngine:
             for code, rt in self._room_type_map.items():
                 new_rate = self._target_rates.get(d_str, {}).get(code)
                 if new_rate is None:
-                    current += timedelta(days=1)
                     continue
 
                 current_rate = self._current_rates.get(d_str, {}).get(code)
@@ -394,18 +471,23 @@ class PricingEngine:
                         "%s %s: %s to $%.0f — %s (%.0f%% occ, %dd out)",
                         code, d_str, direction, new_rate, reason, occ_pct * 100, days_out,
                     )
-                    try:
-                        self.client.put_room_rate(
-                            room_type_id=rt["id"],
-                            rate_plan_id=self._rate_plan_id,
-                            date_str=d_str,
-                            rate=new_rate,
+                    if not rt.get("rate_id"):
+                        logger.warning(
+                            "%s %s: skipping push — no rateID available for this room type",
+                            code, d_str,
                         )
-                        self._updates_pushed.append(
-                            f"{code} {d_str}: {direction} → ${new_rate:.0f}"
-                        )
-                    except CloudbedsAPIError as exc:
-                        logger.error("Failed to push rate for %s on %s: %s", code, d_str, exc)
+                    else:
+                        try:
+                            self.client.patch_rate(
+                                rate_id=rt["rate_id"],
+                                date_str=d_str,
+                                rate=new_rate,
+                            )
+                            self._updates_pushed.append(
+                                f"{code} {d_str}: {direction} → ${new_rate:.0f}"
+                            )
+                        except CloudbedsAPIError as exc:
+                            logger.error("Failed to push rate for %s on %s: %s", code, d_str, exc)
                 else:
                     logger.debug(
                         "%s %s: unchanged at $%.0f (diff=%.2f, threshold=%.0f)",
