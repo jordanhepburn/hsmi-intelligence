@@ -31,14 +31,31 @@ LOOKAHEAD_DAYS: int = 60
 # Only push a rate update to Cloudbeds if the difference exceeds this threshold
 RATE_CHANGE_THRESHOLD: float = 5.0  # AUD
 
-# Keywords used to match Cloudbeds room type names to our pricing tier codes.
-# Matching is case-insensitive substring search on roomTypeName + roomTypeShortName.
-# Add synonyms here if Cloudbeds uses different naming for this property.
+# Cloudbeds room type short codes (roomTypeShortName) that the pricing engine
+# should silently ignore — e.g. whole-property group booking types.
+IGNORED_SHORT_CODES: set[str] = {"MOT"}
+
+# Mapping from our pricing tier code → the exact Cloudbeds roomTypeShortName.
+# Short-code matching is attempted FIRST and is always preferred over keyword
+# matching.  Only room types whose short code appears here (or matches a
+# NAME_KEYWORDS entry) will be priced.
+SHORT_CODE_MAP: dict[str, str] = {
+    "TWI": "TWI",
+    "QUE": "QUE",
+    "SPA": "SPA",
+    "FAM": "FAM",
+    "BAL": "BAL",
+    "ACC": "ACC",
+}
+
+# Fallback keyword matching used only when a room type has no short code, or
+# its short code doesn't appear in SHORT_CODE_MAP.  Case-insensitive substring
+# search on roomTypeName.
 NAME_KEYWORDS: dict[str, list[str]] = {
-    "TWI": ["twin", "twi"],
-    "QUE": ["queen", "que"],
+    "TWI": ["twin room"],
+    "QUE": ["queen"],
     "SPA": ["spa"],
-    "FAM": ["family", "fam"],
-    "BAL": ["balcony", "bal"],
-    "ACC": ["accessible", "acc", "access", "disability", "disabled"],
+    "FAM": ["family"],
+    "BAL": ["balcony", "upstairs twin"],
+    "ACC": ["accessible", "access", "disability", "disabled"],
 }

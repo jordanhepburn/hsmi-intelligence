@@ -146,13 +146,23 @@ class CloudbedsClient:
         """
         Fetch all rate plans for the property.
 
+        Passes ``detailedRates=true`` so Cloudbeds includes per-room-type
+        rate information.  Logs the full raw response at INFO level so the
+        caller can inspect the structure and field names returned by this
+        property.
+
         Returns
         -------
         dict
             Raw API response from GET /getRatePlans.
         """
-        logger.info("Fetching rate plans")
-        return self._get("getRatePlans")
+        logger.info("Fetching rate plans (detailedRates=true)")
+        response = self._get("getRatePlans", params={"detailedRates": "true"})
+
+        import json as _json
+        logger.info("getRatePlans raw response:\n%s", _json.dumps(response, indent=2, default=str))
+
+        return response
 
     def get_rates(
         self,
