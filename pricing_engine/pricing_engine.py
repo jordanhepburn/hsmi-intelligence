@@ -35,7 +35,7 @@ for _p in (_REPO_ROOT, os.path.join(_REPO_ROOT, "shared"), _HERE):
         sys.path.insert(0, _p)
 
 from cloudbeds_client import CloudbedsClient, CloudbedsAPIError  # noqa: E402
-from config import IGNORED_SHORT_CODES, LOOKAHEAD_DAYS, NAME_KEYWORDS, RATE_CHANGE_THRESHOLD, ROOM_TYPES, SHORT_CODE_MAP  # noqa: E402
+from config import IGNORED_ROOM_TYPE_IDS, LOOKAHEAD_DAYS, RATE_CHANGE_THRESHOLD, ROOM_TYPE_ID_MAP, ROOM_TYPES  # noqa: E402
 from holidays import is_peak_date  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -112,141 +112,37 @@ class PricingEngine:
 
     def _load_room_types(self) -> None:
         """
-        Fetch room types from Cloudbeds and map them to our pricing tier codes.
+        Populate _room_type_map from the hardcoded ROOM_TYPE_ID_MAP in config.py.
 
-        Cloudbeds returns room types with their own IDs and names, which may not
-        match our short codes (TWI/QUE/SPA/FAM/BAL/ACC) directly.  We perform
-        case-insensitive keyword matching on roomTypeName and roomTypeShortName.
-        The full API response is logged at INFO level so the mapping can be
-        reviewed and NAME_KEYWORDS adjusted if needed.
+        No API call or name matching needed — IDs were confirmed directly from
+        the Cloudbeds property and stored in config.  getRoomTypes is still
+        called so the full API response is visible in logs for sanity-checking.
         """
-        logger.info("Step 1: Loading and mapping room types from Cloudbeds")
-        raw_room_types = self.client.get_room_types()  # full response already logged by client
+        logger.info("Step 1: Loading room types")
 
-        if not raw_room_types:
-            logger.critical("getRoomTypes returned no data — cannot continue")
-            sys.exit(1)
-
-        # ----------------------------------------------------------------
-        # Log a human-readable summary of every room type Cloudbeds returned
-        # ----------------------------------------------------------------
-        logger.info("Cloudbeds returned %d room type(s):", len(raw_room_types))
+        # Still call the API so any future discrepancies show up in logs
+        raw_room_types = self.client.get_room_types()
+        logger.info("Cloudbeds returned %d room type(s) from API:", len(raw_room_types))
         for rt in raw_room_types:
-            rt_id   = str(rt.get("roomTypeID") or rt.get("id") or "?")
-            name    = str(rt.get("roomTypeName") or rt.get("name") or "?")
-            short   = str(rt.get("roomTypeShortName") or rt.get("shortName") or rt.get("code") or "")
-            total   = rt.get("totalRooms") or rt.get("roomsCount") or rt.get("count") or "?"
-            logger.info("  id=%-12s  name=%-30s  short=%-6s  total=%s", rt_id, name, short, total)
+            rt_id  = str(rt.get("roomTypeID") or rt.get("id") or "?")
+            name   = str(rt.get("roomTypeName") or rt.get("name") or "?")
+            short  = str(rt.get("roomTypeShortName") or rt.get("shortName") or rt.get("code") or "—")
+            total  = rt.get("totalRooms") or rt.get("roomsCount") or rt.get("count") or "?"
+            prefix = "  IGNORED" if rt_id in IGNORED_ROOM_TYPE_IDS else "  "
+            logger.info("%s  id=%-18s  name=%-30s  short=%-6s  total=%s", prefix, rt_id, name, short, total)
 
-        # ----------------------------------------------------------------
-        # Build a reverse index: cloudbeds_short_code → record
-        # ----------------------------------------------------------------
-        short_to_rt: dict[str, dict] = {}
-        for rt in raw_room_types:
-            sc = (
-                rt.get("roomTypeShortName") or rt.get("shortName") or rt.get("code") or ""
-            ).strip().upper()
-            if sc:
-                short_to_rt[sc] = rt
-
-        # ----------------------------------------------------------------
-        # Match each Cloudbeds room type to our pricing tier codes.
-        # Priority order:
-        #   1. Exact roomTypeShortName match via SHORT_CODE_MAP  (most reliable)
-        #   2. Case-insensitive keyword match on roomTypeName     (fallback)
-        # Room types whose short code is in IGNORED_SHORT_CODES are skipped.
-        # ----------------------------------------------------------------
-        unmatched_api_ids = {
-            str(rt.get("roomTypeID") or rt.get("id") or "")
-            for rt in raw_room_types
-        }
-        ignored_ids: set[str] = set()
-
-        # Pre-log any ignored room types
-        for sc in IGNORED_SHORT_CODES:
-            if sc in short_to_rt:
-                rt = short_to_rt[sc]
-                rt_id = str(rt.get("roomTypeID") or rt.get("id") or "")
-                logger.info(
-                    "IGNORED: short=%s id=%s ('%s') — listed in IGNORED_SHORT_CODES",
-                    sc, rt_id, rt.get("roomTypeName") or rt.get("name"),
-                )
-                ignored_ids.add(rt_id)
-
-        for code in ROOM_TYPES:
-            rt: dict | None = None
-            match_method = ""
-
-            # --- Pass 1: exact short code ---
-            expected_sc = SHORT_CODE_MAP.get(code, code)
-            if expected_sc in short_to_rt:
-                candidate = short_to_rt[expected_sc]
-                cid = str(candidate.get("roomTypeID") or candidate.get("id") or "")
-                if cid not in ignored_ids:
-                    rt = candidate
-                    match_method = f"exact short code '{expected_sc}'"
-
-            # --- Pass 2: keyword match on roomTypeName ---
-            if rt is None:
-                keywords = NAME_KEYWORDS.get(code, [])
-                keyword_matches = []
-                for candidate in raw_room_types:
-                    cid = str(candidate.get("roomTypeID") or candidate.get("id") or "")
-                    if cid in ignored_ids:
-                        continue
-                    name_haystack = (candidate.get("roomTypeName") or "").lower()
-                    if any(kw.lower() in name_haystack for kw in keywords):
-                        keyword_matches.append(candidate)
-
-                if len(keyword_matches) > 1:
-                    names = [m.get("roomTypeName") for m in keyword_matches]
-                    logger.warning(
-                        "Ambiguous keyword match for tier '%s': matched %d room types %s. "
-                        "Using first. Set SHORT_CODE_MAP['%s'] to the exact short code to fix.",
-                        code, len(keyword_matches), names, code,
-                    )
-                if keyword_matches:
-                    rt = keyword_matches[0]
-                    match_method = f"keyword fallback {NAME_KEYWORDS.get(code)}"
-
-            if rt is None:
-                logger.warning(
-                    "No Cloudbeds room type matched pricing tier '%s' "
-                    "(tried short code '%s', keywords %s) — tier skipped",
-                    code, SHORT_CODE_MAP.get(code, code), NAME_KEYWORDS.get(code),
-                )
-                continue
-
-            rt_id = str(rt.get("roomTypeID") or rt.get("id") or "")
-            total = int(rt.get("totalRooms") or rt.get("roomsCount") or rt.get("count") or 0)
-            total = total if total > 0 else 1
-            self._room_type_map[code] = {"id": rt_id, "total_rooms": total}
-            unmatched_api_ids.discard(rt_id)
+        # Build map directly from hardcoded IDs
+        for code, entry in ROOM_TYPE_ID_MAP.items():
+            self._room_type_map[code] = {
+                "id": entry["id"],
+                "total_rooms": entry["total_rooms"],
+            }
             logger.info(
-                "MAPPED: %s → id=%s ('%s') via %s, %d room(s)",
-                code, rt_id, rt.get("roomTypeName") or rt.get("name"), match_method, total,
+                "MAPPED: %s → id=%s ('%s'), %d room(s)",
+                code, entry["id"], entry["name"], entry["total_rooms"],
             )
 
-        # Warn about Cloudbeds room types that weren't mapped or ignored
-        leftover = unmatched_api_ids - ignored_ids
-        if leftover:
-            logger.warning(
-                "Cloudbeds room type IDs not mapped to any pricing tier: %s — "
-                "add to IGNORED_SHORT_CODES or NAME_KEYWORDS in config.py if needed",
-                sorted(leftover),
-            )
-
-        if not self._room_type_map:
-            logger.critical(
-                "No room types could be mapped. Review the getRoomTypes response above "
-                "and update NAME_KEYWORDS in pricing_engine/config.py."
-            )
-            sys.exit(1)
-
-        logger.info(
-            "Room type mapping complete: %d/%d tiers mapped",
-            len(self._room_type_map), len(ROOM_TYPES),
-        )
+        logger.info("Room type map loaded: %d tiers", len(self._room_type_map))
 
     # ------------------------------------------------------------------
     # Step 2: Load rate plans
@@ -257,7 +153,7 @@ class PricingEngine:
         Fetch rate plans and select the first active standard / BAR plan.
         """
         logger.info("Step 2: Loading rate plans")
-        response = self.client.get_rate_plans()
+        response = self.client.get_rate_plans(self.today, self.end_date)
         data = response.get("data", response)
         plans = data if isinstance(data, list) else data.get("ratePlans", [])
 

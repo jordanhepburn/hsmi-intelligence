@@ -142,22 +142,30 @@ class CloudbedsClient:
     # Public API methods
     # ------------------------------------------------------------------
 
-    def get_rate_plans(self) -> dict:
+    def get_rate_plans(self, start_date: date, end_date: date) -> dict:
         """
-        Fetch all rate plans for the property.
+        Fetch all rate plans for the property over the given date window.
 
-        Passes ``detailedRates=true`` so Cloudbeds includes per-room-type
-        rate information.  Logs the full raw response at INFO level so the
-        caller can inspect the structure and field names returned by this
-        property.
+        Parameters
+        ----------
+        start_date : date
+        end_date : date
 
         Returns
         -------
         dict
             Raw API response from GET /getRatePlans.
         """
-        logger.info("Fetching rate plans (detailedRates=true)")
-        response = self._get("getRatePlans", params={"detailedRates": "true"})
+        params = {
+            "startDate": start_date.strftime("%Y-%m-%d"),
+            "endDate": end_date.strftime("%Y-%m-%d"),
+            "detailedRates": "true",
+        }
+        logger.info(
+            "Fetching rate plans startDate=%s endDate=%s detailedRates=true",
+            params["startDate"], params["endDate"],
+        )
+        response = self._get("getRatePlans", params=params)
 
         import json as _json
         logger.info("getRatePlans raw response:\n%s", _json.dumps(response, indent=2, default=str))

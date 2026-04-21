@@ -31,31 +31,25 @@ LOOKAHEAD_DAYS: int = 60
 # Only push a rate update to Cloudbeds if the difference exceeds this threshold
 RATE_CHANGE_THRESHOLD: float = 5.0  # AUD
 
-# Cloudbeds room type short codes (roomTypeShortName) that the pricing engine
-# should silently ignore — e.g. whole-property group booking types.
-IGNORED_SHORT_CODES: set[str] = {"MOT"}
-
-# Mapping from our pricing tier code → the exact Cloudbeds roomTypeShortName.
-# Short-code matching is attempted FIRST and is always preferred over keyword
-# matching.  Only room types whose short code appears here (or matches a
-# NAME_KEYWORDS entry) will be priced.
-SHORT_CODE_MAP: dict[str, str] = {
-    "TWI": "TWI",
-    "QUE": "QUE",
-    "SPA": "SPA",
-    "FAM": "FAM",
-    "BAL": "BAL",
-    "ACC": "ACC",
+# Hardcoded Cloudbeds room type IDs for this property.
+# These are authoritative — no name or short-code matching is needed.
+# Update here if room types are ever reconfigured in Cloudbeds.
+#
+#   Code  Cloudbeds ID        Name                  Units
+#   TWI   8444747503112281    Twin Room             7
+#   QUE   8444807581536336    Queen Room            2
+#   SPA   8444866768408617    King Spa Room         2
+#   FAM   8444603143032894    Family Room           4
+#   BAL   53164553982152      Upstairs Twin Room    2
+#   ACC   8444882454052890    Accessible Twin Room  1
+ROOM_TYPE_ID_MAP: dict[str, dict] = {
+    "TWI": {"id": "8444747503112281",  "name": "Twin Room",             "total_rooms": 7},
+    "QUE": {"id": "8444807581536336",  "name": "Queen Room",            "total_rooms": 2},
+    "SPA": {"id": "8444866768408617",  "name": "King Spa Room",         "total_rooms": 2},
+    "FAM": {"id": "8444603143032894",  "name": "Family Room",           "total_rooms": 4},
+    "BAL": {"id": "53164553982152",    "name": "Upstairs Twin Room",    "total_rooms": 2},
+    "ACC": {"id": "8444882454052890",  "name": "Accessible Twin Room",  "total_rooms": 1},
 }
 
-# Fallback keyword matching used only when a room type has no short code, or
-# its short code doesn't appear in SHORT_CODE_MAP.  Case-insensitive substring
-# search on roomTypeName.
-NAME_KEYWORDS: dict[str, list[str]] = {
-    "TWI": ["twin room"],
-    "QUE": ["queen"],
-    "SPA": ["spa"],
-    "FAM": ["family"],
-    "BAL": ["balcony", "upstairs twin"],
-    "ACC": ["accessible", "access", "disability", "disabled"],
-}
+# Cloudbeds room type IDs to silently ignore (e.g. whole-property bookings).
+IGNORED_ROOM_TYPE_IDS: set[str] = {"88154598678728"}  # Motel Takeover
