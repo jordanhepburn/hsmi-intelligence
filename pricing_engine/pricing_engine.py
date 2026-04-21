@@ -593,9 +593,11 @@ class PricingEngine:
         """
         Post a Slack message after each run.
 
-        Base runs (6am AEST): always post — either a health check (0 changes)
-        or the rate-change summary (N > 0 changes).
-        Hourly runs: silent unless at least one rate was pushed.
+        Base runs (6am AEST): always post the health check.  If rates were also
+        updated, a brief count is appended so the operator knows without burying
+        the snapshot under a long change list.
+        Hourly runs: silent unless at least one rate was pushed, then post the
+        arrow-format change list.
         """
         if not self.slack_webhook:
             logger.warning("SLACK_WEBHOOK_URL not set — skipping Slack notification")
@@ -607,12 +609,19 @@ class PricingEngine:
             logger.info("No rate changes — skipping Slack notification (hourly run)")
             return
 
-        text = self._build_health_check_message() if n == 0 else self._build_rate_changes_message(n)
+        if self.is_base_run:
+            text = self._build_health_check_message()
+            if n > 0:
+                text += f"\n_Also pushed {n} rate update{'s' if n != 1 else ''} — see run logs_"
+            label = f"health check (+{n} updates)" if n > 0 else "health check"
+        else:
+            text  = self._build_rate_changes_message(n)
+            label = f"{n} updates"
 
         try:
             response = requests.post(self.slack_webhook, json={"text": text}, timeout=10)
             response.raise_for_status()
-            logger.info("Slack notification sent (%s)", "health check" if n == 0 else f"{n} updates")
+            logger.info("Slack notification sent (%s)", label)
         except requests.RequestException as exc:
             logger.warning("Failed to send Slack notification: %s", exc)
 
@@ -681,7 +690,8 @@ class PricingEngine:
                 pct    = (new - old) / old * 100
                 change = f"${old:.0f} → ${new:.0f} ({pct:+.0f}%)"
             else:
-                change = f"${new:.0f} (new)"
+                # Old rate not available from Cloudbeds — show new rate only
+                change = f"→ ${new:.0f}"
 
             suffix = f" — {u['bracket']}" if u["bracket"] else ""
             lines.append(f"{arrow} {u['code']} {date_s}: {change}{suffix}")
