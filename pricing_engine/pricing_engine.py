@@ -134,12 +134,12 @@ class PricingEngine:
         # Daily base run at 20:00 UTC (6am AEST) uses full 60-day window.
         # All other runs (hourly) use a 14-day window to stay fast.
         utc_hour = datetime.utcnow().hour
-        is_base_run = (utc_hour == 20)
-        lookahead = LOOKAHEAD_DAYS if is_base_run else 14
+        self.is_base_run = (utc_hour == 20)
+        lookahead = LOOKAHEAD_DAYS if self.is_base_run else 14
         self.end_date = self.today + timedelta(days=lookahead)
         logger.info(
             "Run type: %s (UTC hour=%d) — lookahead=%d days",
-            "DAILY BASE" if is_base_run else "HOURLY",
+            "DAILY BASE" if self.is_base_run else "HOURLY",
             utc_hour,
             lookahead,
         )
@@ -590,17 +590,83 @@ class PricingEngine:
     # ------------------------------------------------------------------
 
     def _send_slack_summary(self) -> None:
-        """Post a summary of rate changes to Slack."""
+        """
+        Post a Slack message after each run.
+
+        Base runs (6am AEST): always post — either a health check (0 changes)
+        or the rate-change summary (N > 0 changes).
+        Hourly runs: silent unless at least one rate was pushed.
+        """
         if not self.slack_webhook:
             logger.warning("SLACK_WEBHOOK_URL not set — skipping Slack notification")
             return
 
         n = len(self._updates_pushed)
-        if n == 0:
-            logger.info("No rate changes required — skipping Slack notification")
+
+        if not self.is_base_run and n == 0:
+            logger.info("No rate changes — skipping Slack notification (hourly run)")
             return
 
-        # Sort by date ascending, then room type code
+        text = self._build_health_check_message() if n == 0 else self._build_rate_changes_message(n)
+
+        try:
+            response = requests.post(self.slack_webhook, json={"text": text}, timeout=10)
+            response.raise_for_status()
+            logger.info("Slack notification sent (%s)", "health check" if n == 0 else f"{n} updates")
+        except requests.RequestException as exc:
+            logger.warning("Failed to send Slack notification: %s", exc)
+
+    def _build_health_check_message(self) -> str:
+        """Daily health check posted when the base run finds no rate changes needed."""
+        n_dates = (self.end_date - self.today).days
+        n_rooms = len(self._room_type_map)
+        total_capacity = sum(rt["total_rooms"] for rt in self._room_type_map.values())
+
+        lines = [
+            f"*HSMI Pricing Engine — {self.today.strftime('%a %d %b %Y')}*",
+            f"✅ Daily base run complete — all rates already optimal",
+            f"_{n_dates} dates checked · {n_rooms} room types_",
+            f"",
+            f"*Occupancy snapshot — next 7 days*",
+        ]
+
+        alerts: list[str] = []
+
+        for i in range(7):
+            d = self.today + timedelta(days=i)
+            d_str = d.strftime("%Y-%m-%d")
+            day_label = d.strftime("%a %d %b")
+            occ_data = self._occupancy.get(d_str, {})
+
+            # Property-wide occupancy for this date
+            booked = sum(
+                round(occ_data.get(code, 0.0) * rt["total_rooms"])
+                for code, rt in self._room_type_map.items()
+            )
+            overall_pct = booked / total_capacity * 100 if total_capacity else 0
+
+            # Room types at ≥70% (entering the +25% / +35% bracket territory)
+            high = [
+                f"{code} {occ_data.get(code, 0.0) * 100:.0f}%"
+                for code in sorted(self._room_type_map)
+                if occ_data.get(code, 0.0) >= 0.70
+            ]
+            high_str = "  ⚠️ " + ", ".join(high) if high else ""
+            lines.append(f"  {day_label}   {overall_pct:3.0f}% full{high_str}")
+
+            # Collect dates with any room type ≥70% for the alert block
+            if high:
+                alerts.append(f"  {day_label}: {', '.join(high)}")
+
+        if alerts:
+            lines += ["", "*High occupancy (≥70%) in next 7 days*"]
+            lines.extend(alerts)
+
+        lines += ["", f"📋 https://www.notion.so/349c905ced6b81d1be30d33aa3cf15eb"]
+        return "\n".join(lines)
+
+    def _build_rate_changes_message(self, n: int) -> str:
+        """Rate-change summary posted whenever updates were pushed."""
         sorted_updates = sorted(self._updates_pushed, key=lambda u: (u["date"], u["code"]))
         shown = sorted_updates[:20]
 
@@ -617,8 +683,7 @@ class PricingEngine:
             else:
                 change = f"${new:.0f} (new)"
 
-            bracket = u["bracket"]
-            suffix  = f" — {bracket}" if bracket else ""
+            suffix = f" — {u['bracket']}" if u["bracket"] else ""
             lines.append(f"{arrow} {u['code']} {date_s}: {change}{suffix}")
 
         summary = "\n".join(lines)
@@ -633,21 +698,12 @@ class PricingEngine:
             else "⛔ No rateIDs — no updates pushed"
         )
 
-        payload = {
-            "text": (
-                f"*HSMI Pricing Engine — {self.today}*\n"
-                f"_{n} rate update{'s' if n != 1 else ''} pushed — {push_status}_\n\n"
-                f"{summary}\n\n"
-                f"📋 https://www.notion.so/349c905ced6b81d1be30d33aa3cf15eb"
-            )
-        }
-
-        try:
-            response = requests.post(self.slack_webhook, json=payload, timeout=10)
-            response.raise_for_status()
-            logger.info("Slack summary sent (%d updates)", n)
-        except requests.RequestException as exc:
-            logger.warning("Failed to send Slack summary: %s", exc)
+        return (
+            f"*HSMI Pricing Engine — {self.today}*\n"
+            f"_{n} rate update{'s' if n != 1 else ''} pushed — {push_status}_\n\n"
+            f"{summary}\n\n"
+            f"📋 https://www.notion.so/349c905ced6b81d1be30d33aa3cf15eb"
+        )
 
 
 # ---------------------------------------------------------------------------
