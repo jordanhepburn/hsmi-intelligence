@@ -163,195 +163,82 @@ class PricingEngine:
 
     def _load_rate_plans(self) -> None:
         """
-        Fetch rate plans, log all of them, select the best match, and extract
-        per-room-type rateIDs needed for patchRate calls.
-        """
-        import json as _json
+        Fetch rate plans and extract per-room-type rateIDs needed for patchRate.
 
+        The Cloudbeds getRatePlans endpoint (with detailedRates=true) returns a
+        flat list of individual rate entries under data[].  Each entry has:
+          rateID, roomTypeID, isDerived, ratePlanID (absent on standalone rates)
+
+        Strategy:
+          1. Collect all non-derived entries for our room types.
+          2. Group by ratePlanID; select the plan covering the most room types.
+          3. Fall back to standalone rates (no ratePlanID) for any gaps.
+        """
         logger.info("Step 2: Loading rate plans")
         response = self.client.get_rate_plans(self.today, self.end_date)
-        data = response.get("data", response)
 
-        # getRatePlans may return a list or a dict keyed by ratePlanID
-        if isinstance(data, list):
-            plans = data
-        elif isinstance(data, dict):
-            raw = data.get("ratePlans", data)
-            plans = list(raw.values()) if isinstance(raw, dict) else raw
+        entries = response.get("data", [])
+        if isinstance(entries, dict):
+            entries = list(entries.values())
+
+        if not entries:
+            logger.critical("getRatePlans returned no entries — cannot continue")
+            sys.exit(1)
+
+        our_ids = {rt["id"] for rt in self._room_type_map.values()}
+
+        # plan_coverage[planID][roomTypeID] = rateID  (non-derived only)
+        plan_coverage: dict[str, dict[str, str]] = {}
+        # standalone[roomTypeID] = rateID  (non-derived, no ratePlanID)
+        standalone: dict[str, str] = {}
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            room_type_id = str(entry.get("roomTypeID") or "")
+            rate_id      = str(entry.get("rateID") or "")
+            is_derived   = entry.get("isDerived", False)
+            plan_id      = str(entry.get("ratePlanID") or "")
+
+            if is_derived or not room_type_id or not rate_id:
+                continue
+            if room_type_id not in our_ids:
+                continue
+
+            if plan_id:
+                plan_coverage.setdefault(plan_id, {})
+                plan_coverage[plan_id].setdefault(room_type_id, rate_id)
+            else:
+                standalone.setdefault(room_type_id, rate_id)
+
+        # Log all non-derived plans and their room-type coverage
+        logger.info("Non-derived rate plans found (by coverage of our %d room types):", len(our_ids))
+        for plan_id, coverage in sorted(plan_coverage.items(), key=lambda x: -len(x[1])):
+            codes = [c for c, rt in self._room_type_map.items() if rt["id"] in coverage]
+            logger.info("  planID=%-22s  covers %d/%d: %s", plan_id, len(coverage), len(our_ids), codes)
+        if standalone:
+            codes = [c for c, rt in self._room_type_map.items() if rt["id"] in standalone]
+            logger.info("  standalone (no planID)          covers %d/%d: %s", len(standalone), len(our_ids), codes)
+
+        # Select the plan covering the most of our room types
+        if plan_coverage:
+            best_plan_id = max(plan_coverage, key=lambda pid: len(plan_coverage[pid]))
+            selected = plan_coverage[best_plan_id]
+            self._rate_plan_id = best_plan_id
+            logger.info("Selected planID=%s (%d/%d room types)", best_plan_id, len(selected), len(our_ids))
         else:
-            plans = []
+            selected = {}
+            self._rate_plan_id = ""
+            logger.warning("No plan-based rates found — will use standalone rates only")
 
-        if not plans:
-            logger.critical("getRatePlans returned no plans — cannot continue")
-            sys.exit(1)
-
-        # Log every plan name/ID so Jordan can confirm which is the base rate
-        logger.info("getRatePlans returned %d plan(s):", len(plans))
-        for p in plans:
-            p_id   = str(p.get("ratePlanID") or p.get("id") or "?")
-            p_name = p.get("ratePlanNamePrivate") or p.get("ratePlanName") or p.get("name") or "?"
-            p_pub  = p.get("ratePlanNamePublic") or ""
-            p_stat = p.get("status") or "?"
-            logger.info(
-                "  id=%-20s  private='%s'  public='%s'  status=%s",
-                p_id, p_name, p_pub, p_stat,
-            )
-
-        # Select rate plan: prefer BAR / standard / best-available, else first active
-        selected_plan: dict | None = None
-        for p in plans:
-            name_str = " ".join([
-                p.get("ratePlanNamePrivate") or "",
-                p.get("ratePlanNamePublic") or "",
-                p.get("ratePlanName") or "",
-            ]).lower()
-            status = str(p.get("status") or "active").lower()
-            if status not in ("active", "1", "true", "enabled"):
-                continue
-            if any(kw in name_str for kw in ("bar", "standard", "best available", "rack")):
-                selected_plan = p
-                break
-
-        if selected_plan is None:
-            # Fallback: first active plan
-            for p in plans:
-                status = str(p.get("status") or "active").lower()
-                if status in ("active", "1", "true", "enabled"):
-                    selected_plan = p
-                    logger.warning("No BAR/standard plan found — using first active plan")
-                    break
-
-        if selected_plan is None:
-            logger.critical("No active rate plans found — cannot continue")
-            sys.exit(1)
-
-        self._rate_plan_id = str(
-            selected_plan.get("ratePlanID") or selected_plan.get("id") or ""
-        )
-        plan_name = (
-            selected_plan.get("ratePlanNamePrivate")
-            or selected_plan.get("ratePlanName")
-            or selected_plan.get("name")
-            or "?"
-        )
-        logger.info("Selected rate plan: '%s' (id=%s)", plan_name, self._rate_plan_id)
-
-        # Dump the full selected plan JSON so we can see exactly how rateIDs
-        # are nested — this is the diagnostic that will tell us the real structure.
-        logger.info(
-            "Selected plan full structure:\n%s",
-            _json.dumps(selected_plan, indent=2, default=str),
-        )
-
-        # ----------------------------------------------------------------
-        # Extract rateID per room type.
-        # Cloudbeds nests rateIDs differently depending on API version.
-        # We try every known shape and log each attempt.
-        # ----------------------------------------------------------------
+        # Build final rateID map: prefer plan rates, fill gaps with standalone
         rate_id_by_room_type_id: dict[str, str] = {}
+        for room_type_id in our_ids:
+            rid = selected.get(room_type_id) or standalone.get(room_type_id)
+            if rid:
+                rate_id_by_room_type_id[room_type_id] = rid
 
-        def _record(rt_id: str, rate_id: str, source: str) -> None:
-            if rt_id and rate_id and rt_id not in rate_id_by_room_type_id:
-                rate_id_by_room_type_id[rt_id] = rate_id
-                logger.info("  rateID [%s]: roomTypeID=%s → rateID=%s", source, rt_id, rate_id)
-
-        # Shape A: plan.rooms = {roomTypeID: {rates: {rateID: {...}}}}
-        rooms = selected_plan.get("rooms")
-        if isinstance(rooms, dict):
-            logger.info("  Trying shape A (plan.rooms dict)…")
-            for rt_id, room_data in rooms.items():
-                if not isinstance(room_data, dict):
-                    continue
-                rates = room_data.get("rates", {})
-                if isinstance(rates, dict):
-                    for rate_key, rate_val in rates.items():
-                        # The key itself is often the rateID; the value may also carry it
-                        rid = (
-                            (rate_val.get("rateID") if isinstance(rate_val, dict) else None)
-                            or rate_key
-                        )
-                        _record(str(rt_id), str(rid), "A-dict")
-                        break  # one rateID per room type is enough
-                elif isinstance(rates, list):
-                    for rate_item in rates:
-                        if isinstance(rate_item, dict):
-                            rid = rate_item.get("rateID") or rate_item.get("id")
-                            if rid:
-                                _record(str(rt_id), str(rid), "A-list")
-                                break
-
-        # Shape B: plan.rooms = [{roomTypeID, rates: [{rateID, ...}]}]
-        if isinstance(rooms, list):
-            logger.info("  Trying shape B (plan.rooms list)…")
-            for room in rooms:
-                if not isinstance(room, dict):
-                    continue
-                rt_id = str(room.get("roomTypeID") or room.get("roomType") or "")
-                rates = room.get("rates", [])
-                if isinstance(rates, list):
-                    for r in rates:
-                        if isinstance(r, dict):
-                            rid = r.get("rateID") or r.get("id")
-                            if rid:
-                                _record(rt_id, str(rid), "B-list")
-                                break
-                elif isinstance(rates, dict):
-                    for rate_key, rate_val in rates.items():
-                        rid = (
-                            (rate_val.get("rateID") if isinstance(rate_val, dict) else None)
-                            or rate_key
-                        )
-                        _record(rt_id, str(rid), "B-dict")
-                        break
-
-        # Shape C: plan.roomTypes or plan.roomRates = [{roomTypeID, rateID}]
-        for field in ("roomTypes", "roomRates", "rates"):
-            items = selected_plan.get(field)
-            if not items:
-                continue
-            if isinstance(items, dict):
-                items = list(items.values())
-            logger.info("  Trying shape C (plan.%s)…", field)
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                rt_id = str(item.get("roomTypeID") or item.get("roomType") or "")
-                rid = str(item.get("rateID") or item.get("id") or "")
-                _record(rt_id, rid, f"C-{field}")
-
-        # Shape D: plan.roomTypes = {roomTypeID: {rateID, rates: [...]}}
-        room_types_dict = selected_plan.get("roomTypes")
-        if isinstance(room_types_dict, dict):
-            logger.info("  Trying shape D (plan.roomTypes dict keyed by roomTypeID)…")
-            for rt_id, rt_data in room_types_dict.items():
-                if not isinstance(rt_data, dict):
-                    continue
-                # rateID may be directly on the room type entry
-                rid = rt_data.get("rateID") or rt_data.get("id")
-                if rid:
-                    _record(str(rt_id), str(rid), "D-direct")
-                    continue
-                # or inside a nested rates structure
-                rates = rt_data.get("rates", {})
-                if isinstance(rates, dict):
-                    for rate_key in rates:
-                        _record(str(rt_id), str(rate_key), "D-rates-key")
-                        break
-                elif isinstance(rates, list):
-                    for r in rates:
-                        if isinstance(r, dict):
-                            rid2 = r.get("rateID") or r.get("id")
-                            if rid2:
-                                _record(str(rt_id), str(rid2), "D-rates-list")
-                                break
-
-        if not rate_id_by_room_type_id:
-            logger.warning(
-                "Could not extract any rateID from the selected rate plan. "
-                "See the full plan structure logged above to diagnose."
-            )
-
-        # Store rateID on each room type entry
+        # Store on each room type and log the result
         for code, rt in self._room_type_map.items():
             rate_id = rate_id_by_room_type_id.get(rt["id"], "")
             rt["rate_id"] = rate_id
