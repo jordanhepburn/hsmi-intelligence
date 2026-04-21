@@ -89,7 +89,7 @@ class CloudbedsClient:
                     method, url, params=params, timeout=30, **kwargs
                 )
 
-                if response.status_code == 200:
+                if response.status_code in (200, 202):
                     return response.json()
 
                 if response.status_code in (429, 500, 502, 503, 504):
