@@ -166,6 +166,8 @@ class PricingEngine:
         Fetch rate plans, log all of them, select the best match, and extract
         per-room-type rateIDs needed for patchRate calls.
         """
+        import json as _json
+
         logger.info("Step 2: Loading rate plans")
         response = self.client.get_rate_plans(self.today, self.end_date)
         data = response.get("data", response)
@@ -183,7 +185,7 @@ class PricingEngine:
             logger.critical("getRatePlans returned no plans — cannot continue")
             sys.exit(1)
 
-        # Log every plan so we can confirm the right one is selected
+        # Log every plan name/ID so Jordan can confirm which is the base rate
         logger.info("getRatePlans returned %d plan(s):", len(plans))
         for p in plans:
             p_id   = str(p.get("ratePlanID") or p.get("id") or "?")
@@ -234,34 +236,119 @@ class PricingEngine:
         )
         logger.info("Selected rate plan: '%s' (id=%s)", plan_name, self._rate_plan_id)
 
-        # Extract per-room-type rateIDs from the selected plan.
-        # These are required for patchRate — the API uses rateID, not roomTypeID.
-        # rateIDs are nested inside the plan under various key names depending on
-        # API version; log what we find so any format differences are visible.
-        room_rates = (
-            selected_plan.get("roomRates")
-            or selected_plan.get("roomTypes")
-            or selected_plan.get("rates")
-            or []
+        # Dump the full selected plan JSON so we can see exactly how rateIDs
+        # are nested — this is the diagnostic that will tell us the real structure.
+        logger.info(
+            "Selected plan full structure:\n%s",
+            _json.dumps(selected_plan, indent=2, default=str),
         )
-        if isinstance(room_rates, dict):
-            room_rates = list(room_rates.values())
 
+        # ----------------------------------------------------------------
+        # Extract rateID per room type.
+        # Cloudbeds nests rateIDs differently depending on API version.
+        # We try every known shape and log each attempt.
+        # ----------------------------------------------------------------
         rate_id_by_room_type_id: dict[str, str] = {}
-        for rr in room_rates:
-            if not isinstance(rr, dict):
-                continue
-            rt_id  = str(rr.get("roomTypeID") or rr.get("roomType") or "")
-            rate_id = str(rr.get("rateID") or rr.get("id") or "")
-            if rt_id and rate_id:
+
+        def _record(rt_id: str, rate_id: str, source: str) -> None:
+            if rt_id and rate_id and rt_id not in rate_id_by_room_type_id:
                 rate_id_by_room_type_id[rt_id] = rate_id
-                logger.info("  rateID mapping: roomTypeID=%s → rateID=%s", rt_id, rate_id)
+                logger.info("  rateID [%s]: roomTypeID=%s → rateID=%s", source, rt_id, rate_id)
+
+        # Shape A: plan.rooms = {roomTypeID: {rates: {rateID: {...}}}}
+        rooms = selected_plan.get("rooms")
+        if isinstance(rooms, dict):
+            logger.info("  Trying shape A (plan.rooms dict)…")
+            for rt_id, room_data in rooms.items():
+                if not isinstance(room_data, dict):
+                    continue
+                rates = room_data.get("rates", {})
+                if isinstance(rates, dict):
+                    for rate_key, rate_val in rates.items():
+                        # The key itself is often the rateID; the value may also carry it
+                        rid = (
+                            (rate_val.get("rateID") if isinstance(rate_val, dict) else None)
+                            or rate_key
+                        )
+                        _record(str(rt_id), str(rid), "A-dict")
+                        break  # one rateID per room type is enough
+                elif isinstance(rates, list):
+                    for rate_item in rates:
+                        if isinstance(rate_item, dict):
+                            rid = rate_item.get("rateID") or rate_item.get("id")
+                            if rid:
+                                _record(str(rt_id), str(rid), "A-list")
+                                break
+
+        # Shape B: plan.rooms = [{roomTypeID, rates: [{rateID, ...}]}]
+        if isinstance(rooms, list):
+            logger.info("  Trying shape B (plan.rooms list)…")
+            for room in rooms:
+                if not isinstance(room, dict):
+                    continue
+                rt_id = str(room.get("roomTypeID") or room.get("roomType") or "")
+                rates = room.get("rates", [])
+                if isinstance(rates, list):
+                    for r in rates:
+                        if isinstance(r, dict):
+                            rid = r.get("rateID") or r.get("id")
+                            if rid:
+                                _record(rt_id, str(rid), "B-list")
+                                break
+                elif isinstance(rates, dict):
+                    for rate_key, rate_val in rates.items():
+                        rid = (
+                            (rate_val.get("rateID") if isinstance(rate_val, dict) else None)
+                            or rate_key
+                        )
+                        _record(rt_id, str(rid), "B-dict")
+                        break
+
+        # Shape C: plan.roomTypes or plan.roomRates = [{roomTypeID, rateID}]
+        for field in ("roomTypes", "roomRates", "rates"):
+            items = selected_plan.get(field)
+            if not items:
+                continue
+            if isinstance(items, dict):
+                items = list(items.values())
+            logger.info("  Trying shape C (plan.%s)…", field)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                rt_id = str(item.get("roomTypeID") or item.get("roomType") or "")
+                rid = str(item.get("rateID") or item.get("id") or "")
+                _record(rt_id, rid, f"C-{field}")
+
+        # Shape D: plan.roomTypes = {roomTypeID: {rateID, rates: [...]}}
+        room_types_dict = selected_plan.get("roomTypes")
+        if isinstance(room_types_dict, dict):
+            logger.info("  Trying shape D (plan.roomTypes dict keyed by roomTypeID)…")
+            for rt_id, rt_data in room_types_dict.items():
+                if not isinstance(rt_data, dict):
+                    continue
+                # rateID may be directly on the room type entry
+                rid = rt_data.get("rateID") or rt_data.get("id")
+                if rid:
+                    _record(str(rt_id), str(rid), "D-direct")
+                    continue
+                # or inside a nested rates structure
+                rates = rt_data.get("rates", {})
+                if isinstance(rates, dict):
+                    for rate_key in rates:
+                        _record(str(rt_id), str(rate_key), "D-rates-key")
+                        break
+                elif isinstance(rates, list):
+                    for r in rates:
+                        if isinstance(r, dict):
+                            rid2 = r.get("rateID") or r.get("id")
+                            if rid2:
+                                _record(str(rt_id), str(rid2), "D-rates-list")
+                                break
 
         if not rate_id_by_room_type_id:
             logger.warning(
-                "No rateID entries found inside the selected rate plan — "
-                "patchRate calls will be skipped. Full plan data: %s",
-                selected_plan,
+                "Could not extract any rateID from the selected rate plan. "
+                "See the full plan structure logged above to diagnose."
             )
 
         # Store rateID on each room type entry
@@ -269,10 +356,10 @@ class PricingEngine:
             rate_id = rate_id_by_room_type_id.get(rt["id"], "")
             rt["rate_id"] = rate_id
             if rate_id:
-                logger.info("  %s: rateID=%s", code, rate_id)
+                logger.info("  %s (roomTypeID=%s): rateID=%s", code, rt["id"], rate_id)
             else:
                 logger.warning(
-                    "  %s (id=%s): no rateID found — rate updates for this type will be skipped",
+                    "  %s (roomTypeID=%s): no rateID found — rate updates for this type will be skipped",
                     code, rt["id"],
                 )
 
