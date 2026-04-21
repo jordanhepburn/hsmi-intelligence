@@ -24,6 +24,7 @@ import traceback
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+import pytz
 import requests
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,59 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 WEEKEND_DAYS = {4, 5, 6}  # Friday=4, Saturday=5, Sunday=6 (weekday() values)
+AEST = pytz.timezone("Australia/Melbourne")
+
+# Occupancy bracket multipliers applied on top of the day-of-week base rate.
+# Each tuple: (upper_bound_inclusive, multiplier, label)
+# Iterated from lowest to highest; first bracket where occ_pct <= upper is used.
+_OCC_BRACKETS: list[tuple[float, float, str]] = [
+    (0.10, 0.85, "0-10%"),
+    (0.25, 0.92, "11-25%"),
+    (0.40, 1.00, "26-40%"),
+    (0.55, 1.08, "41-55%"),
+    (0.70, 1.15, "56-70%"),
+    (0.85, 1.25, "71-85%"),
+    (1.01, 1.35, "86-100%"),
+]
+
+# AFTERNOON window (12pm–5pm AEST): discount urgency +5pp, rate increases capped at +20%.
+_OCC_BRACKETS_AFTERNOON: list[tuple[float, float, str]] = [
+    (0.10, 0.80, "0-10%"),
+    (0.25, 0.87, "11-25%"),
+    (0.40, 0.95, "26-40%"),
+    (0.55, 1.08, "41-55%"),
+    (0.70, 1.15, "56-70%"),
+    (0.85, 1.20, "71-85%"),   # capped at +20%
+    (1.01, 1.20, "86-100%"),  # capped at +20%
+]
+
+
+def _get_time_window() -> tuple[str, str]:
+    """
+    Return (window_name, time_str) based on current Australia/Melbourne time.
+
+    Windows:
+      MORNING   — before 12:00 AEST (full brackets active)
+      AFTERNOON — 12:00–16:59 AEST (capped increases, extra discount urgency)
+      EVENING   — 17:00+ AEST (floor or hold only for same-day pricing)
+    """
+    now_aest = datetime.now(tz=AEST)
+    time_str = now_aest.strftime("%H:%M")
+    hour = now_aest.hour
+    if hour < 12:
+        return "MORNING", time_str
+    elif hour < 17:
+        return "AFTERNOON", time_str
+    else:
+        return "EVENING", time_str
+
+
+def _occ_bracket(occ_pct: float, brackets: list[tuple[float, float, str]]) -> tuple[float, str]:
+    """Return (multiplier, label) for the given occupancy percentage."""
+    for upper, mult, label in brackets:
+        if occ_pct <= upper:
+            return mult, label
+    return brackets[-1][1], brackets[-1][2]
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +174,8 @@ class PricingEngine:
             self._load_room_types()
             self._load_rate_plans()
             self._calculate_occupancy()
+            self._fetch_current_rates()   # must precede _calculate_rates (EVENING window needs live rates)
             self._calculate_rates()
-            self._fetch_current_rates()
             self._push_updates()
             self._send_slack_summary()
             logger.info("=== Pricing Engine complete — %d updates pushed ===", len(self._updates_pushed))
@@ -299,118 +353,8 @@ class PricingEngine:
         return self._occupancy
 
     # ------------------------------------------------------------------
-    # Step 4: Calculate target rates
-    # ------------------------------------------------------------------
-
-    def _calculate_rates(self) -> dict[str, dict[str, float]]:
-        """
-        Apply pricing rules for every room type × every date in the window.
-
-        Returns
-        -------
-        dict
-            ``{date_str: {room_type_code: target_rate}}``
-        """
-        logger.info("Step 4: Calculating target rates")
-
-        current = self.today
-        while current < self.end_date:
-            d_str = current.strftime("%Y-%m-%d")
-            days_out = (current - self.today).days
-            is_weekend = current.weekday() in WEEKEND_DAYS
-            self._target_rates[d_str] = {}
-
-            for code, cfg in self.room_types.items():
-                if code not in self._room_type_map:
-                    continue
-
-                occ_pct = self._occupancy.get(d_str, {}).get(code, 0.0)
-                floor_ = cfg["floor"]
-                ceiling_ = cfg["ceiling"]
-
-                # ---- Priority 1: Peak date — always peak rate, ignore occ ----
-                if is_peak_date(current):
-                    rate = cfg["peak"]
-                    reason = "peak date"
-
-                # ---- Weekend (Fri/Sat/Sun) ----
-                elif is_weekend:
-                    if days_out >= 15:
-                        rate = cfg["weekend"]
-                        reason = "weekend 15+ days — hold base"
-                    elif days_out >= 8:                        # 8–14 days out
-                        if occ_pct > 0.50:
-                            rate = cfg["weekend"] * 1.10
-                            reason = "weekend 8-14d >50% occ +10%"
-                        else:
-                            rate = cfg["weekend"]
-                            reason = "weekend 8-14d hold base"
-                    elif days_out >= 2:                        # 2–7 days out
-                        if occ_pct > 0.80:
-                            rate = cfg["weekend"] * 1.25
-                            reason = "weekend 2-7d >80% occ +25%"
-                        elif occ_pct > 0.60:
-                            rate = cfg["weekend"] * 1.15
-                            reason = "weekend 2-7d >60% occ +15%"
-                        elif occ_pct < 0.30:
-                            rate = cfg["weekend"] * 0.92
-                            reason = "weekend 2-7d <30% occ -8%"
-                        else:
-                            rate = cfg["weekend"]
-                            reason = "weekend 2-7d hold base"
-                    else:                                       # same day / next day
-                        if occ_pct > 0.70:
-                            rate = cfg["weekend"] * 1.20
-                            reason = "weekend last-minute >70% occ +20%"
-                        elif occ_pct < 0.40:
-                            rate = cfg["weekend"] * 0.88
-                            reason = "weekend last-minute <40% occ -12%"
-                        else:
-                            rate = cfg["weekend"]
-                            reason = "weekend last-minute hold base"
-
-                # ---- Midweek (Mon–Thu) ----
-                else:
-                    if days_out >= 14:
-                        rate = cfg["midweek"]
-                        reason = "midweek 14+ days — hold base"
-                    elif days_out >= 7:                        # 7–13 days out
-                        if occ_pct < 0.25:
-                            rate = cfg["midweek"] * 0.90
-                            reason = "midweek 7-14d <25% occ -10%"
-                        else:
-                            rate = cfg["midweek"]
-                            reason = "midweek 7-14d hold base"
-                    elif days_out >= 2:                        # 2–6 days out
-                        if occ_pct < 0.20:
-                            rate = cfg["midweek"] * 0.85
-                            reason = "midweek 2-7d <20% occ -15%"
-                        else:
-                            rate = cfg["midweek"]
-                            reason = "midweek 2-7d hold base"
-                    else:                                       # same day / next day
-                        if occ_pct < 0.30:
-                            rate = cfg["midweek"] * 0.82
-                            reason = "midweek same-day <30% occ -18%"
-                        else:
-                            rate = cfg["midweek"]
-                            reason = "midweek same-day hold base"
-
-                # Clamp to [floor, ceiling]
-                rate = max(floor_, min(ceiling_, round(rate)))
-
-                self._target_rates[d_str][code] = rate
-                logger.debug(
-                    "%s %s → $%.0f (%s | %.0f%% occ | %dd out)",
-                    code, d_str, rate, reason, occ_pct * 100, days_out,
-                )
-
-            current += timedelta(days=1)
-
-        return self._target_rates
-
-    # ------------------------------------------------------------------
-    # Step 5: Fetch current rates from Cloudbeds
+    # Step 4: Fetch current rates from Cloudbeds
+    # (must run before _calculate_rates so EVENING window can hold live rates)
     # ------------------------------------------------------------------
 
     def _fetch_current_rates(self) -> None:
@@ -418,7 +362,7 @@ class PricingEngine:
         Pull the rates currently live in Cloudbeds for comparison.
         Populates ``self._current_rates``.
         """
-        logger.info("Step 5: Fetching current rates from Cloudbeds")
+        logger.info("Step 4: Fetching current rates from Cloudbeds")
         for code, rt in self._room_type_map.items():
             try:
                 rates = self.client.get_rate(
@@ -432,6 +376,134 @@ class PricingEngine:
                     self._current_rates[d_str][code] = rate
             except CloudbedsAPIError as exc:
                 logger.warning("Could not fetch current rates for %s: %s", code, exc)
+
+    # ------------------------------------------------------------------
+    # Step 5: Calculate target rates
+    # ------------------------------------------------------------------
+
+    def _calculate_rates(self) -> dict[str, dict[str, float]]:
+        """
+        Apply the occupancy bracket multiplier system for every room type × date.
+
+        Bracket multipliers are applied on top of the day-of-week base rate
+        (midweek / weekend / peak from Notion tiers).
+
+        Special cases:
+          - Peak dates: use peak base rate, then apply occupancy bracket.
+          - Weekend 15+ days out: hold weekend base rate unchanged (too far
+            out to react meaningfully to current occupancy).
+          - Same-day EVENING (17:00+ AEST):
+              occ > 85% → hold current live rate
+              occ ≤ 85% → set to floor
+
+        Returns
+        -------
+        dict
+            ``{date_str: {room_type_code: target_rate}}``
+        """
+        logger.info("Step 5: Calculating target rates")
+
+        time_window, time_str = _get_time_window()
+        window_desc = {
+            "MORNING":   "full brackets active",
+            "AFTERNOON": "capped increases (+20% max), discount urgency +5pp",
+            "EVENING":   "floor or hold only for same-day",
+        }[time_window]
+        logger.info("Time window: %s (%s AEST) — %s", time_window, time_str, window_desc)
+
+        current = self.today
+        while current < self.end_date:
+            d_str = current.strftime("%Y-%m-%d")
+            days_out = (current - self.today).days
+            is_weekend = current.weekday() in WEEKEND_DAYS
+            is_same_day = (days_out == 0)
+            self._target_rates[d_str] = {}
+
+            for code, cfg in self.room_types.items():
+                if code not in self._room_type_map:
+                    continue
+
+                occ_pct = self._occupancy.get(d_str, {}).get(code, 0.0)
+                floor_  = cfg["floor"]
+                ceiling_ = cfg["ceiling"]
+
+                # ── Special case: weekend 15+ days — hold base, skip brackets ──
+                if is_weekend and not is_peak_date(current) and days_out >= 15:
+                    rate = max(floor_, min(ceiling_, round(cfg["weekend"])))
+                    self._target_rates[d_str][code] = rate
+                    logger.debug(
+                        "%s %s: $%.0f weekend base (15+ days out — hold, no occ bracket)",
+                        code, d_str, rate,
+                    )
+                    continue
+
+                # ── Special case: same-day EVENING ──
+                if is_same_day and time_window == "EVENING":
+                    if occ_pct > 0.85:
+                        live = self._current_rates.get(d_str, {}).get(code)
+                        if live is not None:
+                            rate = max(floor_, min(ceiling_, round(live)))
+                            reason = f"EVENING: occ >85% — hold live rate ${live:.0f}"
+                        else:
+                            # No live rate available — hold base as safe fallback
+                            base = cfg["peak"] if is_peak_date(current) else (cfg["weekend"] if is_weekend else cfg["midweek"])
+                            rate = max(floor_, min(ceiling_, round(base)))
+                            reason = "EVENING: occ >85% — hold base (live rate unavailable)"
+                    else:
+                        rate = floor_
+                        reason = f"EVENING: occ ≤85% — floor"
+                    self._target_rates[d_str][code] = rate
+                    logger.info(
+                        "%s %s: $%.0f (%.0f%% occ | %s)",
+                        code, d_str, rate, occ_pct * 100, reason,
+                    )
+                    continue
+
+                # ── Determine base rate ──
+                if is_peak_date(current):
+                    base_rate = cfg["peak"]
+                    base_label = "peak"
+                elif is_weekend:
+                    base_rate = cfg["weekend"]
+                    base_label = "weekend"
+                else:
+                    base_rate = cfg["midweek"]
+                    base_label = "midweek"
+
+                # ── Select bracket table ──
+                if is_same_day and time_window == "AFTERNOON":
+                    brackets = _OCC_BRACKETS_AFTERNOON
+                else:
+                    brackets = _OCC_BRACKETS
+
+                multiplier, bracket_label = _occ_bracket(occ_pct, brackets)
+
+                raw_rate   = base_rate * multiplier
+                rounded    = round(raw_rate)
+                final_rate = max(floor_, min(ceiling_, rounded))
+
+                # Build log suffix describing any clamp
+                if final_rate < rounded:
+                    clamp_note = f"→ capped at ${final_rate:.0f} ceiling"
+                elif final_rate > rounded:
+                    clamp_note = f"→ floored at ${final_rate:.0f} floor"
+                else:
+                    clamp_note = f"→ ${final_rate:.0f}"
+
+                logger.info(
+                    "%s %s: $%.0f %s × %.2f (%s occ) = $%.0f %s",
+                    code, d_str,
+                    base_rate, base_label,
+                    multiplier, bracket_label,
+                    raw_rate,
+                    clamp_note,
+                )
+
+                self._target_rates[d_str][code] = final_rate
+
+            current += timedelta(days=1)
+
+        return self._target_rates
 
     # ------------------------------------------------------------------
     # Step 6: Push updates
@@ -473,10 +545,9 @@ class PricingEngine:
 
                 # Decide whether to push
                 if diff > RATE_CHANGE_THRESHOLD:
-                    reason = _rate_reason(code, current, occ_pct, days_out, self.room_types[code])
                     logger.info(
-                        "%s %s: %s to $%.0f — %s (%.0f%% occ, %dd out)",
-                        code, d_str, direction, new_rate, reason, occ_pct * 100, days_out,
+                        "%s %s: %s to $%.0f (%.0f%% occ, %dd out)",
+                        code, d_str, direction, new_rate, occ_pct * 100, days_out,
                     )
                     if not rt.get("rate_id"):
                         logger.warning(
@@ -545,46 +616,6 @@ class PricingEngine:
             logger.info("Slack summary sent (%d updates)", n)
         except requests.RequestException as exc:
             logger.warning("Failed to send Slack summary: %s", exc)
-
-
-# ---------------------------------------------------------------------------
-# Helper: human-readable reason for a rate decision
-# ---------------------------------------------------------------------------
-
-
-def _rate_reason(
-    code: str,
-    d: date,
-    occ_pct: float,
-    days_out: int,
-    cfg: dict,
-) -> str:
-    """Return a short human-readable explanation for the chosen rate."""
-    is_weekend = d.weekday() in WEEKEND_DAYS
-
-    if is_peak_date(d):
-        return "peak date"
-    if is_weekend:
-        if days_out >= 15:
-            return "weekend 15+ days base"
-        if days_out >= 8:
-            return "weekend 8-14d >50% occ +10%" if occ_pct > 0.50 else "weekend 8-14d base"
-        if days_out >= 2:
-            if occ_pct > 0.80: return "weekend 2-7d >80% occ +25%"
-            if occ_pct > 0.60: return "weekend 2-7d >60% occ +15%"
-            if occ_pct < 0.30: return "weekend 2-7d <30% occ -8%"
-            return "weekend 2-7d base"
-        if occ_pct > 0.70: return "weekend last-minute >70% occ +20%"
-        if occ_pct < 0.40: return "weekend last-minute <40% occ -12%"
-        return "weekend last-minute base"
-    # Midweek
-    if days_out >= 14:
-        return "midweek 14+ days base"
-    if days_out >= 7:
-        return "midweek 7-14d <25% occ -10%" if occ_pct < 0.25 else "midweek 7-14d base"
-    if days_out >= 2:
-        return "midweek 2-7d <20% occ -15%" if occ_pct < 0.20 else "midweek 2-7d base"
-    return "midweek same-day <30% occ -18%" if occ_pct < 0.30 else "midweek same-day base"
 
 
 # ---------------------------------------------------------------------------

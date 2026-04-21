@@ -1,0 +1,36 @@
+name: HSMI Monthly Performance Report
+
+on:
+  schedule:
+    # 7:00 am AEST on the 1st of each month = 21:00 UTC on the last day of the prior month
+    # GitHub Actions evaluates this against UTC, so we use "0 21 L * *" equivalently as
+    # "0 21 28-31 * *" with a day-of-month guard in the script.
+    # Simplest reliable approach: run at 21:00 UTC on the 1st — which is 7am AEST next day.
+    - cron: '0 21 1 * *'
+  workflow_dispatch:
+    # Allows manual trigger from the GitHub Actions UI
+
+jobs:
+  report:
+    name: Monthly Performance Report
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run monthly report
+        env:
+          CLOUDBEDS_API_KEY: ${{ secrets.CLOUDBEDS_API_KEY }}
+          CLOUDBEDS_PROPERTY_ID: ${{ secrets.CLOUDBEDS_PROPERTY_ID }}
+          SLACK_GROWTH_WEBHOOK_URL: ${{ secrets.SLACK_GROWTH_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python reports/monthly_report.py
