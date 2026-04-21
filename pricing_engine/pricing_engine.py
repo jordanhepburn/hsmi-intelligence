@@ -531,7 +531,8 @@ class PricingEngine:
             "text": (
                 f"*HSMI Pricing Engine — {self.today}*\n"
                 f"{n} rate update{'s' if n != 1 else ''} pushed\n"
-                f"{summary_lines}"
+                f"{summary_lines}\n"
+                f"📋 To adjust pricing tiers: https://www.notion.so/349c905ced6b81d1be30d33aa3cf15eb"
             )
         }
 
