@@ -53,3 +53,16 @@ ROOM_TYPE_ID_MAP: dict[str, dict] = {
 
 # Cloudbeds room type IDs to silently ignore (e.g. whole-property bookings).
 IGNORED_ROOM_TYPE_IDS: set[str] = {"88154598678728"}  # Motel Takeover
+
+# Cloudbeds BASE rate plan rateIDs — these are the public rates pushed to all
+# OTA channels.  PlanID=BASE in the Cloudbeds API.  Hardcoded here so the
+# engine never accidentally targets a non-public plan (e.g. tradie rates).
+# Verify via: GET /getRatePlans?detailedRates=false → PlanID=BASE entries.
+BASE_RATE_IDS: dict[str, str] = {
+    "TWI": "8444747503112283",   # Twin Room
+    "QUE": "8444807581536338",   # Queen Room
+    "SPA": "8444866768408619",   # King Spa Room
+    "FAM": "8444603143032896",   # Family Room
+    "BAL": "53164553982155",     # Upstairs Twin Room
+    "ACC": "8444882454052892",   # Accessible Twin Room
+}

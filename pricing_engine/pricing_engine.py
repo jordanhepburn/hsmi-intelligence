@@ -36,7 +36,7 @@ for _p in (_REPO_ROOT, os.path.join(_REPO_ROOT, "shared"), _HERE):
         sys.path.insert(0, _p)
 
 from cloudbeds_client import CloudbedsClient, CloudbedsAPIError  # noqa: E402
-from config import IGNORED_ROOM_TYPE_IDS, LOOKAHEAD_DAYS, RATE_CHANGE_THRESHOLD, ROOM_TYPE_ID_MAP  # noqa: E402
+from config import BASE_RATE_IDS, IGNORED_ROOM_TYPE_IDS, LOOKAHEAD_DAYS, RATE_CHANGE_THRESHOLD, ROOM_TYPE_ID_MAP  # noqa: E402
 from holidays import is_peak_date  # noqa: E402
 from notion_loader import load_pricing_tiers  # noqa: E402
 
@@ -175,92 +175,63 @@ class PricingEngine:
 
     def _load_rate_plans(self) -> None:
         """
-        Fetch rate plans and extract per-room-type rateIDs needed for patchRate.
+        Assign rateIDs for patchRate calls.
 
-        The Cloudbeds getRatePlans endpoint (with detailedRates=true) returns a
-        flat list of individual rate entries under data[].  Each entry has:
-          rateID, roomTypeID, isDerived, ratePlanID (absent on standalone rates)
+        Primary source: BASE_RATE_IDS in config.py — the hardcoded Cloudbeds
+        Base Rate (PlanID=BASE) rateIDs that drive public OTA pricing.
 
-        Strategy:
-          1. Collect all non-derived entries for our room types.
-          2. Group by ratePlanID; select the plan covering the most room types.
-          3. Fall back to standalone rates (no ratePlanID) for any gaps.
+        Fallback: API discovery from getRatePlans for any code missing from
+        BASE_RATE_IDS (should never be needed unless a room type is added).
         """
         logger.info("Step 2: Loading rate plans")
-        response = self.client.get_rate_plans(self.today, self.end_date)
+        logger.info(
+            "Targeting BASE rate plan — changes will affect public rates across all channels"
+        )
 
-        entries = response.get("data", [])
-        if isinstance(entries, dict):
-            entries = list(entries.values())
-
-        if not entries:
-            logger.critical("getRatePlans returned no entries — cannot continue")
-            sys.exit(1)
-
-        our_ids = {rt["id"] for rt in self._room_type_map.values()}
-
-        # plan_coverage[planID][roomTypeID] = rateID  (non-derived only)
-        plan_coverage: dict[str, dict[str, str]] = {}
-        # standalone[roomTypeID] = rateID  (non-derived, no ratePlanID)
-        standalone: dict[str, str] = {}
-
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            room_type_id = str(entry.get("roomTypeID") or "")
-            rate_id      = str(entry.get("rateID") or "")
-            is_derived   = entry.get("isDerived", False)
-            plan_id      = str(entry.get("ratePlanID") or "")
-
-            if is_derived or not room_type_id or not rate_id:
-                continue
-            if room_type_id not in our_ids:
-                continue
-
-            if plan_id:
-                plan_coverage.setdefault(plan_id, {})
-                plan_coverage[plan_id].setdefault(room_type_id, rate_id)
-            else:
-                standalone.setdefault(room_type_id, rate_id)
-
-        # Log all non-derived plans and their room-type coverage
-        logger.info("Non-derived rate plans found (by coverage of our %d room types):", len(our_ids))
-        for plan_id, coverage in sorted(plan_coverage.items(), key=lambda x: -len(x[1])):
-            codes = [c for c, rt in self._room_type_map.items() if rt["id"] in coverage]
-            logger.info("  planID=%-22s  covers %d/%d: %s", plan_id, len(coverage), len(our_ids), codes)
-        if standalone:
-            codes = [c for c, rt in self._room_type_map.items() if rt["id"] in standalone]
-            logger.info("  standalone (no planID)          covers %d/%d: %s", len(standalone), len(our_ids), codes)
-
-        # Select the plan covering the most of our room types
-        if plan_coverage:
-            best_plan_id = max(plan_coverage, key=lambda pid: len(plan_coverage[pid]))
-            selected = plan_coverage[best_plan_id]
-            self._rate_plan_id = best_plan_id
-            logger.info("Selected planID=%s (%d/%d room types)", best_plan_id, len(selected), len(our_ids))
-        else:
-            selected = {}
-            self._rate_plan_id = ""
-            logger.warning("No plan-based rates found — will use standalone rates only")
-
-        # Build final rateID map: prefer plan rates, fill gaps with standalone
-        rate_id_by_room_type_id: dict[str, str] = {}
-        for room_type_id in our_ids:
-            rid = selected.get(room_type_id) or standalone.get(room_type_id)
-            if rid:
-                rate_id_by_room_type_id[room_type_id] = rid
-
-        # Store on each room type and log the result
+        # Start with hardcoded BASE rateIDs — these are authoritative
         for code, rt in self._room_type_map.items():
-            rate_id = rate_id_by_room_type_id.get(rt["id"], "")
+            rate_id = BASE_RATE_IDS.get(code, "")
             rt["rate_id"] = rate_id
             if rate_id:
-                logger.info("  %s (roomTypeID=%s): rateID=%s", code, rt["id"], rate_id)
+                logger.info("  %s: rateID=%s (BASE plan, hardcoded)", code, rate_id)
             else:
-                logger.warning(
-                    "  %s (roomTypeID=%s): no rateID found — rate updates for this type will be skipped",
-                    code, rt["id"],
-                )
+                logger.warning("  %s: not in BASE_RATE_IDS — will attempt API discovery", code)
+
+        # If any codes are missing, try to fill from getRatePlans API response
+        missing_codes = [c for c, rt in self._room_type_map.items() if not rt.get("rate_id")]
+        if missing_codes:
+            logger.info("Attempting API discovery for missing codes: %s", missing_codes)
+            try:
+                response = self.client.get_rate_plans(self.today, self.end_date)
+                entries = response.get("data", [])
+                if isinstance(entries, dict):
+                    entries = list(entries.values())
+
+                # BASE plan entries have no ratePlanID field (PlanID=BASE)
+                base_by_rt_id: dict[str, str] = {}
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("isDerived") or entry.get("ratePlanID"):
+                        continue  # skip derived and non-base plans
+                    rt_id  = str(entry.get("roomTypeID") or "")
+                    rid    = str(entry.get("rateID") or "")
+                    if rt_id and rid:
+                        base_by_rt_id[rt_id] = rid
+
+                for code in missing_codes:
+                    rt = self._room_type_map[code]
+                    rid = base_by_rt_id.get(rt["id"], "")
+                    rt["rate_id"] = rid
+                    if rid:
+                        logger.info("  %s: rateID=%s (BASE plan, API discovered)", code, rid)
+                    else:
+                        logger.warning(
+                            "  %s (roomTypeID=%s): no BASE rateID found — skipping rate updates",
+                            code, rt["id"],
+                        )
+            except Exception as exc:
+                logger.warning("API discovery failed: %s — missing codes will be skipped", exc)
 
         enabled = sum(1 for rt in self._room_type_map.values() if rt.get("rate_id"))
         total = len(self._room_type_map)
