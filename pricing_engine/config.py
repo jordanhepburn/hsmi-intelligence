@@ -30,3 +30,15 @@ LOOKAHEAD_DAYS: int = 60
 
 # Only push a rate update to Cloudbeds if the difference exceeds this threshold
 RATE_CHANGE_THRESHOLD: float = 5.0  # AUD
+
+# Keywords used to match Cloudbeds room type names to our pricing tier codes.
+# Matching is case-insensitive substring search on roomTypeName + roomTypeShortName.
+# Add synonyms here if Cloudbeds uses different naming for this property.
+NAME_KEYWORDS: dict[str, list[str]] = {
+    "TWI": ["twin", "twi"],
+    "QUE": ["queen", "que"],
+    "SPA": ["spa"],
+    "FAM": ["family", "fam"],
+    "BAL": ["balcony", "bal"],
+    "ACC": ["accessible", "acc", "access", "disability", "disabled"],
+}

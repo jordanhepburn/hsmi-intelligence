@@ -214,39 +214,38 @@ class CloudbedsClient:
         logger.debug("Retrieved %d rate entries", len(rates))
         return rates
 
-    def get_room_types(self) -> dict[str, dict]:
+    def get_room_types(self) -> list[dict]:
         """
-        Fetch room types and return a mapping keyed by short name.
+        Fetch all room types from Cloudbeds and return raw records.
+
+        Logs the full API response at INFO level so the caller can inspect
+        field names and values returned by this specific property.
 
         Returns
         -------
-        dict[str, dict]
-            ``{short_name: {"id": str, "total_rooms": int}}``
+        list[dict]
+            Raw room type records, each containing all fields returned by the
+            API.  Common fields: roomTypeID, roomTypeName, roomTypeShortName,
+            totalRooms (but these may differ per property/API version).
         """
-        logger.info("Fetching room types")
+        logger.info("Fetching room types from Cloudbeds")
         response = self._get("getRoomTypes")
 
-        room_types: dict[str, dict] = {}
+        # Log the full raw response so callers can inspect the actual field names
+        import json as _json
+        logger.info("getRoomTypes raw response:\n%s", _json.dumps(response, indent=2, default=str))
+
         data = response.get("data", response)
-        items = data if isinstance(data, list) else data.get("roomTypes", [])
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            # Cloudbeds sometimes nests under 'roomTypes' as a list or dict
+            raw = data.get("roomTypes", data)
+            items = list(raw.values()) if isinstance(raw, dict) else raw
+        else:
+            items = []
 
-        for rt in items:
-            # Try various field names Cloudbeds may use for the short/code name
-            short_name = (
-                rt.get("roomTypeShortName")
-                or rt.get("shortName")
-                or rt.get("roomTypeCode")
-                or rt.get("code")
-                or ""
-            ).upper()
-            rt_id = str(rt.get("roomTypeID") or rt.get("id") or "")
-            total = int(rt.get("totalRooms") or rt.get("roomsCount") or rt.get("count") or 0)
-
-            if short_name and rt_id:
-                room_types[short_name] = {"id": rt_id, "total_rooms": total}
-                logger.debug("Room type %s → id=%s rooms=%d", short_name, rt_id, total)
-
-        return room_types
+        return items
 
     def get_reservations(self, start_date: date, end_date: date) -> list[dict]:
         """
