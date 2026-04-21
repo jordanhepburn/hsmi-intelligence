@@ -172,20 +172,18 @@ class CloudbedsClient:
 
         return response
 
-    def get_rates(
+    def get_rate(
         self,
         room_type_id: str,
-        rate_plan_id: str,
         start_date: date,
         end_date: date,
     ) -> dict[str, float]:
         """
-        Fetch nightly rates for a specific room type and rate plan.
+        Fetch current nightly rates for a room type (GET /getRate).
 
         Parameters
         ----------
         room_type_id : str
-        rate_plan_id : str
         start_date : date
         end_date : date
 
@@ -195,27 +193,31 @@ class CloudbedsClient:
             Mapping of ``"YYYY-MM-DD"`` → rate (float).
         """
         logger.info(
-            "Fetching rates for room_type=%s plan=%s %s→%s",
-            room_type_id,
-            rate_plan_id,
-            start_date,
-            end_date,
+            "Fetching current rates via getRate: room_type=%s %s→%s",
+            room_type_id, start_date, end_date,
         )
         params = {
             "roomTypeID": room_type_id,
-            "ratePlanID": rate_plan_id,
             "startDate": start_date.strftime("%Y-%m-%d"),
             "endDate": end_date.strftime("%Y-%m-%d"),
+            "detailedRates": "true",
         }
-        response = self._get("getRates", params=params)
+        response = self._get("getRate", params=params)
+
+        import json as _json
+        logger.debug("getRate raw response:\n%s", _json.dumps(response, indent=2, default=str))
 
         rates: dict[str, float] = {}
-        # Cloudbeds returns data under 'data' key; structure may vary
         data = response.get("data", response)
         if isinstance(data, dict):
             for date_str, rate_info in data.items():
                 if isinstance(rate_info, dict):
-                    rates[date_str] = float(rate_info.get("rate", rate_info.get("roomRate", 0)))
+                    val = rate_info.get("roomRate") or rate_info.get("rate")
+                    if val is not None:
+                        try:
+                            rates[date_str] = float(val)
+                        except (TypeError, ValueError):
+                            pass
                 else:
                     try:
                         rates[date_str] = float(rate_info)
@@ -225,11 +227,14 @@ class CloudbedsClient:
             for item in data:
                 if isinstance(item, dict):
                     d = item.get("date") or item.get("startDate")
-                    r = item.get("rate") or item.get("roomRate")
+                    r = item.get("roomRate") or item.get("rate")
                     if d and r is not None:
-                        rates[str(d)] = float(r)
+                        try:
+                            rates[str(d)] = float(r)
+                        except (TypeError, ValueError):
+                            pass
 
-        logger.debug("Retrieved %d rate entries", len(rates))
+        logger.debug("getRate returned %d rate entries for room_type=%s", len(rates), room_type_id)
         return rates
 
     def get_room_types(self) -> list[dict]:
@@ -334,44 +339,50 @@ class CloudbedsClient:
         logger.info("Loaded %d active reservations", len(reservations))
         return reservations
 
-    def put_room_rate(
+    def patch_rate(
         self,
-        room_type_id: str,
-        rate_plan_id: str,
+        rate_id: str,
         date_str: str,
         rate: float,
     ) -> dict:
         """
-        Push a single nightly rate to Cloudbeds.
+        Push a single nightly rate update to Cloudbeds (POST /patchRate).
+
+        Uses the rateID obtained from getRatePlans, not the roomTypeID.
+        Cloudbeds processes this asynchronously and returns a jobReferenceID.
 
         Parameters
         ----------
-        room_type_id : str
-        rate_plan_id : str
+        rate_id : str
+            The rateID for this room type / rate plan combination,
+            obtained from getRatePlans.
         date_str : str
             Date in ``"YYYY-MM-DD"`` format.
         rate : float
-            Target rate; rounded to 2 decimal places before submission.
+            Target rate; rounded to nearest dollar before submission.
 
         Returns
         -------
         dict
-            Raw API response.
+            Raw API response (contains jobReferenceID for async tracking).
         """
-        rounded_rate = str(round(rate, 2))
+        rounded_rate = round(rate)
         logger.info(
-            "PUT rate: room_type=%s plan=%s date=%s rate=%s",
-            room_type_id,
-            rate_plan_id,
-            date_str,
-            rounded_rate,
+            "patchRate: rateID=%s date=%s rate=%s",
+            rate_id, date_str, rounded_rate,
         )
-        data = {
-            "propertyID": self._property_id,
-            "roomTypeID": room_type_id,
-            "ratePlanID": rate_plan_id,
-            "startDate": date_str,
-            "endDate": date_str,
-            "roomRate": rounded_rate,
+        payload = {
+            "rates": [
+                {
+                    "rateID": rate_id,
+                    "interval": [
+                        {
+                            "startDate": date_str,
+                            "endDate": date_str,
+                            "rate": rounded_rate,
+                        }
+                    ],
+                }
+            ]
         }
-        return self._post("putRoomRate", data=data)
+        return self._post("patchRate", data=payload)
