@@ -363,6 +363,13 @@ class PricingEngine:
                     code, rt["id"],
                 )
 
+        enabled = sum(1 for rt in self._room_type_map.values() if rt.get("rate_id"))
+        total = len(self._room_type_map)
+        if enabled:
+            logger.info("RATE PUSH ENABLED: %d/%d room types have rateIDs", enabled, total)
+        else:
+            logger.warning("RATE PUSH DISABLED: no rateIDs found — all rate pushes will be skipped")
+
     # ------------------------------------------------------------------
     # Step 3: Calculate occupancy
     # ------------------------------------------------------------------
@@ -614,11 +621,19 @@ class PricingEngine:
             if n > 50:
                 summary_lines += f"\n  … and {n - 50} more"
 
+        enabled = sum(1 for rt in self._room_type_map.values() if rt.get("rate_id"))
+        total = len(self._room_type_map)
+        if enabled:
+            push_status = f"✅ RATE PUSH ENABLED: {enabled}/{total} room types have rateIDs"
+        else:
+            push_status = f"⛔ RATE PUSH DISABLED: no rateIDs found — no updates were pushed"
+
         payload = {
             "text": (
                 f"*HSMI Pricing Engine — {self.today}*\n"
                 f"{n} rate update{'s' if n != 1 else ''} pushed\n"
                 f"{summary_lines}\n"
+                f"{push_status}\n"
                 f"📋 To adjust pricing tiers: https://www.notion.so/349c905ced6b81d1be30d33aa3cf15eb"
             )
         }
