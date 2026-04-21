@@ -9,6 +9,7 @@ by more than the configured threshold ($5).
 Environment variables (required unless marked optional):
   CLOUDBEDS_API_KEY       — Cloudbeds x-api-key credential
   CLOUDBEDS_PROPERTY_ID   — Cloudbeds property ID
+  NOTION_API_KEY          — Notion integration token (pricing tiers loaded from Notion at startup)
   SLACK_WEBHOOK_URL       — Incoming webhook for the pricing summary (optional)
   ANTHROPIC_API_KEY       — Reserved for future AI-assisted pricing (optional)
 
@@ -35,8 +36,9 @@ for _p in (_REPO_ROOT, os.path.join(_REPO_ROOT, "shared"), _HERE):
         sys.path.insert(0, _p)
 
 from cloudbeds_client import CloudbedsClient, CloudbedsAPIError  # noqa: E402
-from config import IGNORED_ROOM_TYPE_IDS, LOOKAHEAD_DAYS, RATE_CHANGE_THRESHOLD, ROOM_TYPE_ID_MAP, ROOM_TYPES  # noqa: E402
+from config import IGNORED_ROOM_TYPE_IDS, LOOKAHEAD_DAYS, RATE_CHANGE_THRESHOLD, ROOM_TYPE_ID_MAP  # noqa: E402
 from holidays import is_peak_date  # noqa: E402
+from notion_loader import load_pricing_tiers  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -75,6 +77,17 @@ class PricingEngine:
         self.slack_webhook = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
         self.today = date.today()
         self.end_date = self.today + timedelta(days=LOOKAHEAD_DAYS)
+
+        # Load pricing tiers from Notion (falls back to config.py if unavailable)
+        self.room_types = load_pricing_tiers()
+        logger.info("Pricing tiers loaded (%d room types):", len(self.room_types))
+        for code, tiers in sorted(self.room_types.items()):
+            logger.info(
+                "  %s  floor=$%.0f  midweek=$%.0f  weekend=$%.0f  peak=$%.0f  ceiling=$%.0f",
+                code,
+                tiers["floor"], tiers["midweek"], tiers["weekend"],
+                tiers["peak"], tiers["ceiling"],
+            )
 
         # Populated during run()
         self._room_type_map: dict[str, dict] = {}   # code → {id, total_rooms, rate_id}
@@ -342,7 +355,7 @@ class PricingEngine:
             is_weekend = current.weekday() in WEEKEND_DAYS
             self._target_rates[d_str] = {}
 
-            for code, cfg in ROOM_TYPES.items():
+            for code, cfg in self.room_types.items():
                 if code not in self._room_type_map:
                     current += timedelta(days=1)
                     continue
@@ -466,7 +479,7 @@ class PricingEngine:
 
                 # Decide whether to push
                 if diff > RATE_CHANGE_THRESHOLD:
-                    reason = _rate_reason(code, current, occ_pct, days_out, ROOM_TYPES[code])
+                    reason = _rate_reason(code, current, occ_pct, days_out, self.room_types[code])
                     logger.info(
                         "%s %s: %s to $%.0f — %s (%.0f%% occ, %dd out)",
                         code, d_str, direction, new_rate, reason, occ_pct * 100, days_out,
