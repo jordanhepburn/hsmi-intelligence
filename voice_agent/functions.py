@@ -753,12 +753,13 @@ def _verify_retell_signature(body: bytes, signature: str) -> bool:
 
 @app.post("/webhook/call-started")
 async def call_started(request: Request):
-    body      = await request.body()
-    signature = request.headers.get("x-retell-signature", "")
-
-    if signature and not _verify_retell_signature(body, signature):
-        logger.warning("Invalid Retell signature — rejecting call_started webhook")
-        return JSONResponse({"error": "invalid signature"}, status_code=401)
+    # Signature verification disabled — re-enable when Retell webhook secret is confirmed
+    # body      = await request.body()
+    # signature = request.headers.get("x-retell-signature", "")
+    # if signature and not _verify_retell_signature(body, signature):
+    #     logger.warning("Invalid Retell signature — rejecting call_started webhook")
+    #     return JSONResponse({"error": "invalid signature"}, status_code=401)
+    logger.info("call_started webhook — signature verification skipped")
 
     now        = datetime.now(AEST)
     # "Wednesday 22 April 2026"
