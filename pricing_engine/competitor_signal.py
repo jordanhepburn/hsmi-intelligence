@@ -5,9 +5,13 @@ Queries SerpApi for regional accommodation availability and competitor pricing
 around Hepburn Springs / Daylesford. Runs once per day at 12pm AEST via
 GitHub Actions cron '0 2 * * *'.
 
-Makes exactly 4 SerpApi calls per run (2 queries × 2 Saturdays), writing
-the results to competitor_cache.json. The pricing engine reads this cache
-to apply a competitor-aware multiplier on top of its occupancy brackets.
+Makes exactly 4 SerpApi calls per run (2 queries × 2 dates: the coming
+Friday and Saturday), writing the results to competitor_cache.json. The
+pricing engine reads this cache to apply a competitor-aware multiplier
+on top of its occupancy brackets.
+
+If HSMI does not appear in Google Hotels results, the script falls back to
+reading the TWI base rate from Cloudbeds (CLOUDBEDS_API_KEY / _PROPERTY_ID).
 
 Budget: 4 calls/day × 30 days ≈ 120 calls/month (free tier limit: 250/month).
 
@@ -16,8 +20,10 @@ the pricing engine via a local file and GitHub Actions runners are ephemeral.
 The cache exists only within the same workflow job run.
 
 Environment variables:
-  SERP_API_KEY      — SerpApi key (required)
+  SERP_API_KEY              — SerpApi key (required)
   SLACK_PRICING_WEBHOOK_URL — Slack incoming webhook for #api-pricing-engine (optional)
+  CLOUDBEDS_API_KEY         — Cloudbeds API key (optional; enables HSMI price fallback)
+  CLOUDBEDS_PROPERTY_ID     — Cloudbeds property ID (optional; required with above)
 """
 
 import json
@@ -96,12 +102,24 @@ _SKIP_ALIASES = ["wyndham", "albert motel"]
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _next_saturday(today: date) -> date:
-    """Return the next Saturday strictly after today."""
-    days_ahead = (5 - today.weekday()) % 7  # Saturday = weekday 5
-    if days_ahead == 0:
-        days_ahead = 7  # if today IS Saturday, go to next week
-    return today + timedelta(days=days_ahead)
+def _target_dates(today: date) -> tuple[date, date]:
+    """
+    Return (date1, date2) for the coming weekend to check.
+
+    Normal case: the upcoming Friday and Saturday of the same weekend.
+      If today IS Friday, Friday = today (check tonight + tomorrow).
+    Saturday special case: use today as Saturday + next Friday (next weekend).
+    """
+    weekday = today.weekday()  # Mon=0 … Fri=4, Sat=5, Sun=6
+
+    if weekday == 5:  # Today is Saturday — check today + next Friday
+        return today, today + timedelta(days=6)
+
+    # For all other days: find the upcoming Friday (today counts if it's Friday)
+    days_to_fri = (4 - weekday) % 7
+    friday = today + timedelta(days=days_to_fri)
+    saturday = friday + timedelta(days=1)
+    return friday, saturday
 
 
 def _parse_price(val) -> Optional[float]:
@@ -213,6 +231,7 @@ def _process_response(data: dict) -> dict:
 
     hsmi_price: Optional[float] = None
     comp_prices: list[float] = []
+    comp_props: list[dict] = []   # [{name, price}] for each found PRICING_COMP
     reference_props: list[dict] = []
 
     for p in props:
@@ -230,6 +249,7 @@ def _process_response(data: dict) -> dict:
         elif kind == "pricing_comp":
             if price_num:
                 comp_prices.append(price_num)
+                comp_props.append({"name": p.get("name", "?"), "price": price_num})
             logger.info("  COMP  [%s]: %s — %s%s", src, p.get("name"), price_str or "N/A", sold_tag)
         elif kind == "reference":
             reference_props.append({"name": p.get("name", "?"), "price_str": price_str or "N/A"})
@@ -254,16 +274,42 @@ def _process_response(data: dict) -> dict:
     )
 
     return {
-        "regional_pct": regional_pct,
+        "regional_pct":    regional_pct,
         "regional_signal": regional_signal,
-        "hsmi_price": hsmi_price,
-        "comp_avg": round(comp_avg, 2) if comp_avg else None,
-        "comp_min": min(comp_prices) if comp_prices else None,
-        "comp_max": max(comp_prices) if comp_prices else None,
-        "comp_count": len(comp_prices),
+        "hsmi_price":      hsmi_price,
+        "hsmi_source":     "google_hotels",
+        "comp_avg":        round(comp_avg, 2) if comp_avg else None,
+        "comp_min":        min(comp_prices) if comp_prices else None,
+        "comp_max":        max(comp_prices) if comp_prices else None,
+        "comp_count":      len(comp_prices),
+        "comp_props":      comp_props,
         "hsmi_vs_comp_pct": hsmi_vs_comp_pct,
         "reference_props": reference_props,
     }
+
+
+# ---------------------------------------------------------------------------
+# Cloudbeds fallback — used when HSMI is not listed on Google Hotels
+# ---------------------------------------------------------------------------
+
+_TWI_ROOM_TYPE_ID = "8444747503112281"   # Twin Room — reference rate type
+
+
+def _fetch_cloudbeds_rate(cb_api_key: str, cb_property_id: str, d: date) -> Optional[float]:
+    """
+    Fetch HSMI's TWI base rate from Cloudbeds for date d.
+
+    Returns the rate as a float, or None if unavailable.
+    Silently catches all errors so a Cloudbeds outage never blocks the signal.
+    """
+    try:
+        from cloudbeds_client import CloudbedsClient  # noqa: PLC0415
+        client = CloudbedsClient(api_key=cb_api_key, property_id=cb_property_id)
+        rates = client.get_rate(_TWI_ROOM_TYPE_ID, d, d + timedelta(days=1))
+        return rates.get(d.strftime("%Y-%m-%d"))
+    except Exception as exc:
+        logger.warning("Cloudbeds rate fallback failed for %s: %s", d, exc)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -272,20 +318,32 @@ def _process_response(data: dict) -> dict:
 
 def build_and_write_cache(api_key: str) -> dict:
     """
-    Run both SerpApi queries (next 2 Saturdays), build the cache payload,
-    write it to CACHE_PATH, and return the payload.
+    Run SerpApi queries for the coming Friday + Saturday (2 queries each = 4
+    calls total), build the cache payload, write it to CACHE_PATH, and return
+    the payload.
+
+    If CLOUDBEDS_API_KEY / CLOUDBEDS_PROPERTY_ID are set and HSMI is absent
+    from Google Hotels results, the TWI base rate is fetched from Cloudbeds
+    as a fallback so the competitor comparison always has an HSMI price.
     """
     today = date.today()
-    sat1 = _next_saturday(today)
-    sat2 = sat1 + timedelta(weeks=1)
+    d1, d2 = _target_dates(today)
+    logger.info(
+        "Target dates: %s (%s) and %s (%s)",
+        d1, d1.strftime("%a"), d2, d2.strftime("%a"),
+    )
+
+    cb_api_key   = os.environ.get("CLOUDBEDS_API_KEY", "").strip()
+    cb_property_id = os.environ.get("CLOUDBEDS_PROPERTY_ID", "").strip()
+    use_cb_fallback = bool(cb_api_key and cb_property_id)
 
     cache: dict = {
-        "updated_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "query_dates": [sat1.strftime("%Y-%m-%d"), sat2.strftime("%Y-%m-%d")],
-        "signals": {},
+        "updated_at":  datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "query_dates": [d1.strftime("%Y-%m-%d"), d2.strftime("%Y-%m-%d")],
+        "signals":     {},
     }
 
-    for d in (sat1, sat2):
+    for d in (d1, d2):
         d_str = d.strftime("%Y-%m-%d")
         checkout = d + timedelta(days=1)
         logger.info("--- Querying %s (%s) ---", d_str, d.strftime("%a %d %b"))
@@ -293,7 +351,24 @@ def build_and_write_cache(api_key: str) -> dict:
             raw1 = _query_serpapi(api_key, _QUERY_HEPBURN, d, checkout)
             raw2 = _query_serpapi(api_key, _QUERY_DAYLESFORD, d, checkout)
             merged = _merge_responses(raw1, raw2)
-            cache["signals"][d_str] = _process_response(merged)
+            signal = _process_response(merged)
+
+            # HSMI fallback: if Google Hotels didn't list HSMI, use Cloudbeds TWI rate
+            if signal.get("hsmi_price") is None and use_cb_fallback:
+                cb_rate = _fetch_cloudbeds_rate(cb_api_key, cb_property_id, d)
+                if cb_rate is not None:
+                    logger.info(
+                        "HSMI not on Google Hotels — using Cloudbeds TWI rate: A$%.0f", cb_rate
+                    )
+                    signal["hsmi_price"]  = cb_rate
+                    signal["hsmi_source"] = "cloudbeds_fallback"
+                    comp_avg = signal.get("comp_avg")
+                    if comp_avg:
+                        signal["hsmi_vs_comp_pct"] = round(
+                            ((cb_rate - comp_avg) / comp_avg) * 100
+                        )
+
+            cache["signals"][d_str] = signal
         except Exception as exc:
             logger.error("Query failed for %s: %s", d_str, exc)
             cache["signals"][d_str] = {"error": str(exc)}
@@ -348,7 +423,10 @@ def post_slack_summary(cache: dict, webhook_url: str) -> None:
 
         rs = sig.get("regional_signal", "?")
         pct = sig.get("regional_pct", "?")
-        hsmi = f"A${sig['hsmi_price']:.0f}" if sig.get("hsmi_price") else "not listed"
+        hsmi_price = sig.get("hsmi_price")
+        hsmi_source = sig.get("hsmi_source", "google_hotels")
+        hsmi_tag = " _(Cloudbeds fallback)_" if hsmi_source == "cloudbeds_fallback" else ""
+        hsmi_str = f"A${hsmi_price:.0f}{hsmi_tag}" if hsmi_price else "not listed"
         avg = f"A${sig['comp_avg']:.0f}" if sig.get("comp_avg") else "N/A"
         diff = sig.get("hsmi_vs_comp_pct")
         diff_str = f" ({diff:+d}% vs mid-tier avg)" if diff is not None else ""
@@ -356,9 +434,17 @@ def post_slack_summary(cache: dict, webhook_url: str) -> None:
         lines += [
             f"*{day_label}*",
             f"  Regional: {pct}% available — *{rs}*",
-            f"  HSMI: {hsmi}{diff_str} | Mid-tier comp avg: {avg}",
+            f"  HSMI: {hsmi_str}{diff_str} | Mid-tier comp avg: {avg}",
             f"  → {_engine_recommendation(sig)}",
         ]
+
+        # Individual comp prices — verify data quality without checking logs
+        comp_props = sig.get("comp_props", [])
+        if comp_props:
+            comp_parts = ", ".join(
+                f"{c['name'].split(',')[0]} ${c['price']:.0f}" for c in comp_props
+            )
+            lines.append(f"  _Comps: {comp_parts}_")
 
         # Premium benchmarks (reference only — not used in pricing)
         ref = sig.get("reference_props", [])

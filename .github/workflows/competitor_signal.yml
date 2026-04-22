@@ -30,6 +30,8 @@ jobs:
         env:
           SERP_API_KEY: ${{ secrets.SERP_API_KEY }}
           SLACK_PRICING_WEBHOOK_URL: ${{ secrets.SLACK_PRICING_WEBHOOK_URL }}
+          CLOUDBEDS_API_KEY: ${{ secrets.CLOUDBEDS_API_KEY }}
+          CLOUDBEDS_PROPERTY_ID: ${{ secrets.CLOUDBEDS_PROPERTY_ID }}
         run: python pricing_engine/competitor_signal.py
 
       # Brief pause so this run never overlaps with an hourly pricing_engine.yml
