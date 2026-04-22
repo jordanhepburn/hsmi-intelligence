@@ -5,11 +5,11 @@ Queries SerpApi for regional accommodation availability and competitor pricing
 around Hepburn Springs / Daylesford. Runs once per day at 12pm AEST via
 GitHub Actions cron '0 2 * * *'.
 
-Makes exactly 2 SerpApi calls per run (next Saturday + the Saturday after),
-writing the results to competitor_cache.json. The pricing engine reads this
-cache to apply a competitor-aware multiplier on top of its occupancy brackets.
+Makes exactly 4 SerpApi calls per run (2 queries × 2 Saturdays), writing
+the results to competitor_cache.json. The pricing engine reads this cache
+to apply a competitor-aware multiplier on top of its occupancy brackets.
 
-Budget: 2 calls/day × 30 days = 60 calls/month (free tier limit: 100/month).
+Budget: 4 calls/day × 30 days ≈ 120 calls/month (free tier limit: 250/month).
 
 DO NOT import or call this from hourly pricing runs — the cache is shared with
 the pricing engine via a local file and GitHub Actions runners are ephemeral.
@@ -55,6 +55,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 CACHE_PATH = Path(_HERE) / "competitor_cache.json"
 SERP_ENDPOINT = "https://serpapi.com/search"
+
+# Two complementary queries that together cover the full comp set.
+# Q1 captures HSMI + Hepburn-area properties (Mineral Springs, premium refs).
+# Q2 captures Daylesford-area comps (Central, Motor, Frangos, Albert, Royal, Hotel).
+# Merged per date: Q1 takes priority on any duplicate property name.
+_QUERY_HEPBURN    = "Hepburn Springs Victoria accommodation"
+_QUERY_DAYLESFORD = "Daylesford Victoria accommodation motel"
 
 # Mid-tier comps — same tier as HSMI. Prices from this set are averaged
 # and used for the competitor multiplier calculation in the pricing engine.
@@ -110,11 +117,11 @@ def _parse_price(val) -> Optional[float]:
 # SerpApi query + parsing
 # ---------------------------------------------------------------------------
 
-def _query_serpapi(api_key: str, checkin: date, checkout: date) -> dict:
-    """Single SerpApi call. Returns raw JSON."""
+def _query_serpapi(api_key: str, q: str, checkin: date, checkout: date) -> dict:
+    """Single SerpApi call for one query string. Returns raw JSON."""
     params = {
         "engine": "google_hotels",
-        "q": "Hepburn Springs Daylesford Victoria accommodation",
+        "q": q,
         "check_in_date": checkin.strftime("%Y-%m-%d"),
         "check_out_date": checkout.strftime("%Y-%m-%d"),
         "adults": "2",
@@ -123,10 +130,36 @@ def _query_serpapi(api_key: str, checkin: date, checkout: date) -> dict:
         "hl": "en",
         "api_key": api_key,
     }
-    logger.info("SerpApi query: %s → %s", checkin, checkout)
+    logger.info("SerpApi [%s]: %s → %s", q, checkin, checkout)
     resp = requests.get(SERP_ENDPOINT, params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def _merge_responses(r1: dict, r2: dict) -> dict:
+    """
+    Merge two SerpApi responses into one synthetic response.
+
+    Properties are deduped by lowercase name; r1 takes priority on conflicts.
+    Each property gains a '_source' field ('Q1' or 'Q2') used for logging.
+    r1's metadata is kept as the base; only 'properties' is replaced.
+    """
+    if "error" in r1:
+        raise ValueError(f"SerpApi error (Q1): {r1['error']}")
+    if "error" in r2:
+        raise ValueError(f"SerpApi error (Q2): {r2['error']}")
+
+    seen: dict[str, dict] = {}
+    for p in r1.get("properties", []):
+        nl = p.get("name", "").lower()
+        if nl not in seen:
+            seen[nl] = {**p, "_source": "Q1"}
+    for p in r2.get("properties", []):
+        nl = p.get("name", "").lower()
+        if nl not in seen:
+            seen[nl] = {**p, "_source": "Q2"}
+
+    return {**r1, "properties": list(seen.values())}
 
 
 def _classify(nl: str) -> str:
@@ -189,21 +222,22 @@ def _process_response(data: dict) -> dict:
         price_num = _parse_price(price_str)
         sold_tag = " [SOLD OUT]" if p.get("is_sold_out") else ""
         kind = _classify(nl)
+        src = p.get("_source", "?")
 
         if kind == "hsmi":
             hsmi_price = price_num
-            logger.info("  HSMI:  %s — %s%s", p.get("name"), price_str or "N/A", sold_tag)
+            logger.info("  HSMI  [%s]: %s — %s%s", src, p.get("name"), price_str or "N/A", sold_tag)
         elif kind == "pricing_comp":
             if price_num:
                 comp_prices.append(price_num)
-            logger.info("  COMP:  %s — %s%s", p.get("name"), price_str or "N/A", sold_tag)
+            logger.info("  COMP  [%s]: %s — %s%s", src, p.get("name"), price_str or "N/A", sold_tag)
         elif kind == "reference":
             reference_props.append({"name": p.get("name", "?"), "price_str": price_str or "N/A"})
-            logger.info("  REF:   %s — %s%s", p.get("name"), price_str or "N/A", sold_tag)
+            logger.info("  REF   [%s]: %s — %s%s", src, p.get("name"), price_str or "N/A", sold_tag)
         elif kind == "skip":
-            logger.debug("  SKIP:  %s (alias suppressed)", p.get("name"))
+            logger.debug("  SKIP  [%s]: %s (alias suppressed)", src, p.get("name"))
         else:
-            logger.debug("  other: %s — %s", p.get("name"), price_str or "N/A")
+            logger.debug("  other [%s]: %s — %s", src, p.get("name"), price_str or "N/A")
 
     comp_avg = sum(comp_prices) / len(comp_prices) if comp_prices else None
     hsmi_vs_comp_pct = (
@@ -253,10 +287,13 @@ def build_and_write_cache(api_key: str) -> dict:
 
     for d in (sat1, sat2):
         d_str = d.strftime("%Y-%m-%d")
+        checkout = d + timedelta(days=1)
         logger.info("--- Querying %s (%s) ---", d_str, d.strftime("%a %d %b"))
         try:
-            raw = _query_serpapi(api_key, d, d + timedelta(days=1))
-            cache["signals"][d_str] = _process_response(raw)
+            raw1 = _query_serpapi(api_key, _QUERY_HEPBURN, d, checkout)
+            raw2 = _query_serpapi(api_key, _QUERY_DAYLESFORD, d, checkout)
+            merged = _merge_responses(raw1, raw2)
+            cache["signals"][d_str] = _process_response(merged)
         except Exception as exc:
             logger.error("Query failed for %s: %s", d_str, exc)
             cache["signals"][d_str] = {"error": str(exc)}

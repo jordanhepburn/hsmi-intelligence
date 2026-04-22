@@ -2,12 +2,12 @@
 HSMI Weekly Comp Report
 =======================
 Runs every Monday at 9am AEST (11pm UTC Sunday, cron '0 23 * * 0').
-Makes 3 SerpApi calls — Friday, Saturday, and Sunday nights of the coming
-weekend — and posts a pricing table to Slack #growth.
+Makes 6 SerpApi calls — 2 queries × 3 nights (Friday, Saturday, Sunday) —
+and posts a pricing table to Slack #growth.
 
-SerpApi budget: 3 calls/week ≈ 12 calls/month.
-Shared budget with competitor_signal.py (≈60/month) = ≈72/month total.
-Free tier limit: 100/month. Monitor and consider upgrading if approaching limit.
+SerpApi budget: 6 calls/week ≈ 24 calls/month.
+Shared budget with competitor_signal.py (≈120/month) ≈ 144/month total.
+Free tier limit: 250/month.
 
 Environment variables:
   SERP_API_KEY      — SerpApi key (required)
@@ -94,6 +94,13 @@ _REF_NAMES = {
 
 SERP_ENDPOINT = "https://serpapi.com/search"
 
+# Two complementary queries that together cover the full comp set.
+# Q1 captures HSMI + Hepburn-area properties (Mineral Springs, premium refs).
+# Q2 captures Daylesford-area comps (Central, Motor, Frangos, Albert, Royal, Hotel).
+# Merged per night: Q1 takes priority on any duplicate property name.
+_QUERY_HEPBURN    = "Hepburn Springs Victoria accommodation"
+_QUERY_DAYLESFORD = "Daylesford Victoria accommodation motel"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -135,11 +142,11 @@ def _classify(nl: str) -> tuple[str, str]:
 # SerpApi query + parsing
 # ---------------------------------------------------------------------------
 
-def _query_night(api_key: str, checkin: date) -> dict:
-    """Single SerpApi call for one night. Returns raw JSON."""
+def _query_serpapi(api_key: str, q: str, checkin: date) -> dict:
+    """Single SerpApi call for one query string and night. Returns raw JSON."""
     params = {
         "engine": "google_hotels",
-        "q": "Hepburn Springs Daylesford Victoria accommodation",
+        "q": q,
         "check_in_date": checkin.strftime("%Y-%m-%d"),
         "check_out_date": (checkin + timedelta(days=1)).strftime("%Y-%m-%d"),
         "adults": "2",
@@ -148,10 +155,43 @@ def _query_night(api_key: str, checkin: date) -> dict:
         "hl": "en",
         "api_key": api_key,
     }
-    logger.info("SerpApi: %s", checkin.strftime("%a %d %b"))
+    logger.info("SerpApi [%s]: %s", q, checkin.strftime("%a %d %b"))
     resp = requests.get(SERP_ENDPOINT, params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def _merge_responses(r1: dict, r2: dict) -> dict:
+    """
+    Merge two SerpApi responses into one synthetic response.
+
+    Properties are deduped by lowercase name; r1 takes priority on conflicts.
+    Each property gains a '_source' field ('Q1' or 'Q2') used for logging.
+    r1's metadata is kept as the base; only 'properties' is replaced.
+    """
+    if "error" in r1:
+        raise ValueError(f"SerpApi error (Q1): {r1['error']}")
+    if "error" in r2:
+        raise ValueError(f"SerpApi error (Q2): {r2['error']}")
+
+    seen: dict[str, dict] = {}
+    for p in r1.get("properties", []):
+        nl = p.get("name", "").lower()
+        if nl not in seen:
+            seen[nl] = {**p, "_source": "Q1"}
+    for p in r2.get("properties", []):
+        nl = p.get("name", "").lower()
+        if nl not in seen:
+            seen[nl] = {**p, "_source": "Q2"}
+
+    return {**r1, "properties": list(seen.values())}
+
+
+def _query_and_merge_night(api_key: str, checkin: date) -> dict:
+    """Run both search queries for one night and return merged properties."""
+    r1 = _query_serpapi(api_key, _QUERY_HEPBURN, checkin)
+    r2 = _query_serpapi(api_key, _QUERY_DAYLESFORD, checkin)
+    return _merge_responses(r1, r2)
 
 
 def _process_night(data: dict) -> dict:
@@ -196,6 +236,7 @@ def _process_night(data: dict) -> dict:
         price_str = "SOLD" if sold else (f"${price_num:.0f}" if price_num else "N/A")
 
         category, key = _classify(nl)
+        src = p.get("_source", "?")
         entry = {
             "name": p.get("name", "?"),
             "price_str": price_str,
@@ -205,17 +246,17 @@ def _process_night(data: dict) -> dict:
 
         if category == "hsmi":
             hsmi = entry
-            logger.info("  HSMI:  %s — %s", p.get("name"), price_str)
+            logger.info("  HSMI  [%s]: %s — %s", src, p.get("name"), price_str)
         elif category == "pricing_comp":
             pricing_comps[key] = entry
-            logger.info("  COMP:  %s — %s", p.get("name"), price_str)
+            logger.info("  COMP  [%s]: %s — %s", src, p.get("name"), price_str)
         elif category == "reference":
             reference[key] = entry
-            logger.info("  REF:   %s — %s", p.get("name"), price_str)
+            logger.info("  REF   [%s]: %s — %s", src, p.get("name"), price_str)
         elif category == "skip":
-            logger.debug("  SKIP:  %s", p.get("name"))
+            logger.debug("  SKIP  [%s]: %s", src, p.get("name"))
         else:
-            logger.debug("  other: %s — %s", p.get("name"), price_str)
+            logger.debug("  other [%s]: %s — %s", src, p.get("name"), price_str)
 
     comp_prices = [v["price_num"] for v in pricing_comps.values() if v["price_num"]]
     comp_avg = sum(comp_prices) / len(comp_prices) if comp_prices else None
@@ -391,8 +432,8 @@ def run() -> None:
     ]:
         logger.info("--- %s ---", night_date.strftime("%a %d %b"))
         try:
-            raw = _query_night(api_key, night_date)
-            nights[night_key] = _process_night(raw)
+            merged = _query_and_merge_night(api_key, night_date)
+            nights[night_key] = _process_night(merged)
         except Exception as exc:
             logger.error("Query failed for %s: %s", night_date, exc)
             nights[night_key] = {"error": str(exc)}
