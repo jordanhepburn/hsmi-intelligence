@@ -56,21 +56,33 @@ logger = logging.getLogger(__name__)
 CACHE_PATH = Path(_HERE) / "competitor_cache.json"
 SERP_ENDPOINT = "https://serpapi.com/search"
 
-# Keywords to identify competitor properties in Google Hotels results.
-# Matched against lowercased property names.
-COMP_SET_KEYWORDS = [
+# Mid-tier comps — same tier as HSMI. Prices from this set are averaged
+# and used for the competitor multiplier calculation in the pricing engine.
+PRICING_COMPS = [
     "daylesford central",
     "daylesford motor",
     "mineral springs hotel",
-    "hotel bellinzona",
     "central springs inn",
-    "hepburn at hepburn",
     "royal daylesford",
     "hotel frangos",
-    "lake house, daylesford",
-    "hepburn spa pavilions",
-    "hepburn spa retreat",
+    "albert hotel",
+    "daylesford hotel",
 ]
+
+# Premium / reference-only properties — tracked and logged for market context
+# but NOT included in the comp avg used for pricing decisions.
+REFERENCE_ONLY = [
+    "hepburn at hepburn",
+    "lake house",
+    "hotel bellinzona",
+    "bellinzona",
+    "hepburn spa",
+    "shizuka",
+]
+
+# Noise aliases to suppress — same physical property as an entry above,
+# avoids double-counting if Google returns multiple listings.
+_SKIP_ALIASES = ["wyndham", "albert motel"]
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +129,23 @@ def _query_serpapi(api_key: str, checkin: date, checkout: date) -> dict:
     return resp.json()
 
 
+def _classify(nl: str) -> str:
+    """
+    Classify a lowercased property name.
+
+    Returns: 'hsmi' | 'pricing_comp' | 'reference' | 'skip' | 'other'
+    """
+    if "hepburn springs motor" in nl:
+        return "hsmi"
+    if any(alias in nl for alias in _SKIP_ALIASES):
+        return "skip"
+    if any(kw in nl for kw in PRICING_COMPS):
+        return "pricing_comp"
+    if any(kw in nl for kw in REFERENCE_ONLY):
+        return "reference"
+    return "other"
+
+
 def _process_response(data: dict) -> dict:
     """
     Extract competitor signal from a SerpApi response.
@@ -125,10 +154,11 @@ def _process_response(data: dict) -> dict:
       regional_pct      — % of listed properties that are available
       regional_signal   — SOLD_OUT / CRITICAL / HIGH / NORMAL
       hsmi_price        — HSMI nightly rate shown on Google Hotels (or None)
-      comp_avg          — average rate across named comp set
-      comp_min / max    — range of comp set prices
-      comp_count        — number of comps with visible pricing
-      hsmi_vs_comp_pct  — HSMI price relative to comp avg (signed %)
+      comp_avg          — mid-tier PRICING_COMPS average (used for multiplier)
+      comp_min / max    — range of PRICING_COMPS prices
+      comp_count        — number of PRICING_COMPS with visible pricing
+      hsmi_vs_comp_pct  — HSMI price vs PRICING_COMPS avg (signed %)
+      reference_props   — list of {name, price_str} for REFERENCE_ONLY props
     """
     if "error" in data:
         raise ValueError(f"SerpApi error: {data['error']}")
@@ -150,28 +180,28 @@ def _process_response(data: dict) -> dict:
 
     hsmi_price: Optional[float] = None
     comp_prices: list[float] = []
+    reference_props: list[dict] = []
 
     for p in props:
         nl = p.get("name", "").lower()
         price_raw = p.get("rate_per_night", {})
         price_str = price_raw.get("lowest") if isinstance(price_raw, dict) else None
         price_num = _parse_price(price_str)
+        sold_tag = " [SOLD OUT]" if p.get("is_sold_out") else ""
+        kind = _classify(nl)
 
-        if "hepburn springs motor" in nl:
+        if kind == "hsmi":
             hsmi_price = price_num
-            logger.info(
-                "  HSMI: %s — %s%s",
-                p.get("name"), price_str or "N/A",
-                " [SOLD OUT]" if p.get("is_sold_out") else "",
-            )
-        elif any(kw in nl for kw in COMP_SET_KEYWORDS):
+            logger.info("  HSMI:  %s — %s%s", p.get("name"), price_str or "N/A", sold_tag)
+        elif kind == "pricing_comp":
             if price_num:
                 comp_prices.append(price_num)
-            logger.info(
-                "  COMP: %s — %s%s",
-                p.get("name"), price_str or "N/A",
-                " [SOLD OUT]" if p.get("is_sold_out") else "",
-            )
+            logger.info("  COMP:  %s — %s%s", p.get("name"), price_str or "N/A", sold_tag)
+        elif kind == "reference":
+            reference_props.append({"name": p.get("name", "?"), "price_str": price_str or "N/A"})
+            logger.info("  REF:   %s — %s%s", p.get("name"), price_str or "N/A", sold_tag)
+        elif kind == "skip":
+            logger.debug("  SKIP:  %s (alias suppressed)", p.get("name"))
         else:
             logger.debug("  other: %s — %s", p.get("name"), price_str or "N/A")
 
@@ -183,7 +213,7 @@ def _process_response(data: dict) -> dict:
     )
 
     logger.info(
-        "  Regional: %d/%d available (%d%%) — %s | HSMI: %s | Comp avg: %s",
+        "  Regional: %d/%d available (%d%%) — %s | HSMI: %s | Mid-tier avg: %s",
         available, total, regional_pct, regional_signal,
         f"A${hsmi_price:.0f}" if hsmi_price else "not found",
         f"A${comp_avg:.0f}" if comp_avg else "N/A",
@@ -198,6 +228,7 @@ def _process_response(data: dict) -> dict:
         "comp_max": max(comp_prices) if comp_prices else None,
         "comp_count": len(comp_prices),
         "hsmi_vs_comp_pct": hsmi_vs_comp_pct,
+        "reference_props": reference_props,
     }
 
 
@@ -254,11 +285,11 @@ def _engine_recommendation(sig: dict) -> str:
         diff = sig.get("hsmi_vs_comp_pct")
         if hsmi and avg and diff is not None:
             if diff < -15:
-                return f"HSMI is {abs(diff)}% below comp avg — nudge up 8%"
+                return f"HSMI is {abs(diff)}% below mid-tier avg — nudge up 8%"
             elif diff < 0:
-                return f"HSMI is {abs(diff)}% below comp avg — nudge up 5%"
+                return f"HSMI is {abs(diff)}% below mid-tier avg — nudge up 5%"
             else:
-                return "HSMI competitively priced — hold"
+                return "HSMI competitively priced vs mid-tier — hold"
         return "NORMAL demand — hold"
 
 
@@ -283,15 +314,25 @@ def post_slack_summary(cache: dict, webhook_url: str) -> None:
         hsmi = f"A${sig['hsmi_price']:.0f}" if sig.get("hsmi_price") else "not listed"
         avg = f"A${sig['comp_avg']:.0f}" if sig.get("comp_avg") else "N/A"
         diff = sig.get("hsmi_vs_comp_pct")
-        diff_str = f" ({diff:+d}% vs comp avg)" if diff is not None else ""
+        diff_str = f" ({diff:+d}% vs mid-tier avg)" if diff is not None else ""
 
         lines += [
             f"*{day_label}*",
             f"  Regional: {pct}% available — *{rs}*",
-            f"  HSMI: {hsmi}{diff_str} | Comp avg: {avg}",
+            f"  HSMI: {hsmi}{diff_str} | Mid-tier comp avg: {avg}",
             f"  → {_engine_recommendation(sig)}",
-            "",
         ]
+
+        # Premium benchmarks (reference only — not used in pricing)
+        ref = sig.get("reference_props", [])
+        if ref:
+            ref_parts = ", ".join(
+                f"{r['name'].split(',')[0]} {r['price_str']}" for r in ref if r["price_str"] != "N/A"
+            )
+            if ref_parts:
+                lines.append(f"  _Premium benchmarks: {ref_parts}_")
+
+        lines.append("")
 
     lines.append("_Pricing engine running now — rate changes will follow if needed_")
 
