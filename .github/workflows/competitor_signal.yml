@@ -32,6 +32,11 @@ jobs:
           SLACK_PRICING_WEBHOOK_URL: ${{ secrets.SLACK_PRICING_WEBHOOK_URL }}
         run: python pricing_engine/competitor_signal.py
 
+      # Brief pause so this run never overlaps with an hourly pricing_engine.yml
+      # run that may have fired on the same minute (cron '0 2 * * *').
+      - name: Wait for any concurrent hourly run to complete
+        run: sleep 120
+
       # Step 2: run the full pricing engine — it reads competitor_cache.json
       # from the same workspace and applies the competitor multiplier on top
       # of occupancy brackets before pushing to Cloudbeds.
