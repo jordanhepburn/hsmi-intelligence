@@ -789,12 +789,14 @@ class PricingEngine:
 
     def _build_rate_changes_message(self, n: int) -> str:
         """Rate-change summary posted whenever updates were pushed (hourly runs)."""
-        # Sort by absolute % change descending — biggest moves first
+        # Sort by absolute % change descending — biggest moves first.
+        # First-time sets (old_rate is None or 0) return -1.0 so they always
+        # fall below any real percentage change, even a tiny one.
         def _sort_key(u: dict) -> float:
             old, new = u["old_rate"], u["new_rate"]
-            if old and old > 0:
+            if old is not None and old > 0:
                 return abs((new - old) / old)
-            return 0.0
+            return -1.0
 
         sorted_updates = sorted(self._updates_pushed, key=_sort_key, reverse=True)
         shown = sorted_updates[:5]
