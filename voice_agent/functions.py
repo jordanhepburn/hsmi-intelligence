@@ -76,13 +76,17 @@ def _cb() -> CloudbedsClient:
     )
 
 
-def _slack(text: str) -> None:
+def _slack(text: str, username: str = "Cherry", icon_emoji: str = ":telephone_receiver:") -> None:
     webhook = os.environ.get("SLACK_OPERATIONS_WEBHOOK_URL", "").strip()
     if not webhook:
         logger.warning("SLACK_OPERATIONS_WEBHOOK_URL not set — skipping Slack post")
         return
     try:
-        resp = requests.post(webhook, json={"text": text}, timeout=10)
+        resp = requests.post(
+            webhook,
+            json={"text": text, "username": username, "icon_emoji": icon_emoji},
+            timeout=10,
+        )
         resp.raise_for_status()
     except requests.RequestException as exc:
         logger.error("Slack post failed: %s", exc)
@@ -540,7 +544,7 @@ async def hold_room(request: Request):
     phone_calls_webhook = os.environ.get("SLACK_PHONE_CALLS_WEBHOOK_URL", "").strip()
     try:
         if phone_calls_webhook:
-            requests.post(phone_calls_webhook, json={"text": slack_text}, timeout=10).raise_for_status()
+            requests.post(phone_calls_webhook, json={"text": slack_text, "username": "Cherry", "icon_emoji": ":telephone_receiver:"}, timeout=10).raise_for_status()
         else:
             logger.warning("SLACK_PHONE_CALLS_WEBHOOK_URL not set — skipping hold_room Slack post")
     except Exception as exc:
@@ -647,7 +651,7 @@ async def log_maintenance(request: Request):
     )
 
     try:
-        _slack(slack_text)
+        _slack(slack_text, username="Cherry", icon_emoji=":wrench:")
     except Exception as exc:
         logger.error("log_maintenance Slack post failed: %s", exc)
 
@@ -685,7 +689,7 @@ async def log_message(request: Request):
     phone_calls_webhook = os.environ.get("SLACK_PHONE_CALLS_WEBHOOK_URL", "").strip()
     try:
         if phone_calls_webhook:
-            requests.post(phone_calls_webhook, json={"text": slack_text}, timeout=10).raise_for_status()
+            requests.post(phone_calls_webhook, json={"text": slack_text, "username": "Cherry", "icon_emoji": ":memo:"}, timeout=10).raise_for_status()
         else:
             logger.warning("SLACK_PHONE_CALLS_WEBHOOK_URL not set — skipping log_message Slack post")
     except Exception as exc:
