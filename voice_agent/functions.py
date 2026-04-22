@@ -848,3 +848,54 @@ async def call_started(request: Request):
             "current_time": current_time,
         }
     })
+
+
+# ---------------------------------------------------------------------------
+# External cron trigger — called by cron-job.org every hour
+# Triggers the pricing_engine.yml GitHub Actions workflow via workflow_dispatch.
+# More reliable than GitHub's native schedule cron.
+#
+# Environment variables:
+#   GITHUB_TOKEN  — PAT with 'workflow' scope (create at github.com/settings/tokens)
+#   CRON_SECRET   — arbitrary secret shared with cron-job.org (prevents abuse)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/cron/pricing-engine")
+async def cron_pricing_engine(request: Request):
+    # Verify shared secret
+    secret   = request.headers.get("x-cron-secret", "")
+    expected = os.environ.get("CRON_SECRET", "").strip()
+    if expected and not hmac.compare_digest(secret, expected):
+        logger.warning("cron/pricing-engine: invalid secret")
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if not token:
+        logger.error("cron/pricing-engine: GITHUB_TOKEN not set")
+        return JSONResponse({"error": "GITHUB_TOKEN not configured"}, status_code=500)
+
+    resp = requests.post(
+        "https://api.github.com/repos/jordanhepburn/hsmi-intelligence"
+        "/actions/workflows/pricing_engine.yml/dispatches",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept":        "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={"ref": "main"},
+        timeout=15,
+    )
+
+    if resp.status_code == 204:
+        logger.info("cron/pricing-engine: workflow triggered successfully")
+        return JSONResponse({"status": "triggered"})
+
+    logger.error(
+        "cron/pricing-engine: GitHub API returned %s — %s",
+        resp.status_code, resp.text[:200],
+    )
+    return JSONResponse(
+        {"error": f"GitHub API returned {resp.status_code}"},
+        status_code=502,
+    )
