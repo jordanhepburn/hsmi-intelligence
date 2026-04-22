@@ -17,7 +17,7 @@ The cache exists only within the same workflow job run.
 
 Environment variables:
   SERP_API_KEY      — SerpApi key (required)
-  SLACK_WEBHOOK_URL — Slack incoming webhook for signal summary (optional)
+  SLACK_PRICING_WEBHOOK_URL — Slack incoming webhook for #api-pricing-engine (optional)
 """
 
 import json
@@ -357,11 +357,11 @@ def run() -> None:
     logger.info("=== HSMI Competitor Signal — %s ===", date.today())
     cache = build_and_write_cache(api_key)
 
-    webhook = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+    webhook = os.environ.get("SLACK_PRICING_WEBHOOK_URL", "").strip()
     if webhook:
         post_slack_summary(cache, webhook)
     else:
-        logger.info("SLACK_WEBHOOK_URL not set — skipping Slack notification")
+        logger.info("SLACK_PRICING_WEBHOOK_URL not set — skipping Slack notification")
 
     logger.info("=== Competitor Signal complete — cache ready for pricing engine ===")
 

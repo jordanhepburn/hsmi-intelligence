@@ -8,10 +8,9 @@ room type, optionally compares with the same month last year, and posts a
 summary to Slack #growth.
 
 Environment variables:
-  CLOUDBEDS_API_KEY         — Cloudbeds x-api-key credential (required)
-  CLOUDBEDS_PROPERTY_ID     — Cloudbeds property ID (required)
-  SLACK_GROWTH_WEBHOOK_URL  — Slack #growth incoming webhook (required)
-                              Falls back to SLACK_WEBHOOK_URL if not set.
+  CLOUDBEDS_API_KEY    — Cloudbeds x-api-key credential (required)
+  CLOUDBEDS_PROPERTY_ID — Cloudbeds property ID (required)
+  SLACK_WEBHOOK_URL    — Slack #growth incoming webhook (optional)
 
 Usage:
   python reports/monthly_report.py
@@ -105,12 +104,9 @@ class MonthlyReport:
 
         self.client = CloudbedsClient(api_key=api_key, property_id=property_id)
 
-        slack_url = (
-            os.environ.get("SLACK_GROWTH_WEBHOOK_URL", "").strip()
-            or os.environ.get("SLACK_WEBHOOK_URL", "").strip()
-        )
+        slack_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
         if not slack_url:
-            logger.warning("No Slack webhook configured (SLACK_GROWTH_WEBHOOK_URL / SLACK_WEBHOOK_URL) — report will be logged only")
+            logger.warning("SLACK_WEBHOOK_URL not set — report will be logged only")
         self.slack_webhook = slack_url
 
         # Build reverse maps

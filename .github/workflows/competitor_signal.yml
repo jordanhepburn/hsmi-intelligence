@@ -29,7 +29,7 @@ jobs:
       - name: Run competitor signal
         env:
           SERP_API_KEY: ${{ secrets.SERP_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_PRICING_WEBHOOK_URL: ${{ secrets.SLACK_PRICING_WEBHOOK_URL }}
         run: python pricing_engine/competitor_signal.py
 
       # Step 2: run the full pricing engine — it reads competitor_cache.json
@@ -40,6 +40,6 @@ jobs:
           CLOUDBEDS_API_KEY: ${{ secrets.CLOUDBEDS_API_KEY }}
           CLOUDBEDS_PROPERTY_ID: ${{ secrets.CLOUDBEDS_PROPERTY_ID }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_PRICING_WEBHOOK_URL: ${{ secrets.SLACK_PRICING_WEBHOOK_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python pricing_engine/pricing_engine.py

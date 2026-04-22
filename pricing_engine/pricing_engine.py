@@ -10,7 +10,7 @@ Environment variables (required unless marked optional):
   CLOUDBEDS_API_KEY       — Cloudbeds x-api-key credential
   CLOUDBEDS_PROPERTY_ID   — Cloudbeds property ID
   NOTION_API_KEY          — Notion integration token (pricing tiers loaded from Notion at startup)
-  SLACK_WEBHOOK_URL       — Incoming webhook for the pricing summary (optional)
+  SLACK_PRICING_WEBHOOK_URL — Incoming webhook for #api-pricing-engine (optional)
   ANTHROPIC_API_KEY       — Reserved for future AI-assisted pricing (optional)
 
 Usage:
@@ -130,7 +130,7 @@ class PricingEngine:
             sys.exit(1)
 
         self.client = CloudbedsClient(api_key=api_key, property_id=property_id)
-        self.slack_webhook = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+        self.slack_webhook = os.environ.get("SLACK_PRICING_WEBHOOK_URL", "").strip()
         self.today = date.today()
 
         # Daily base run at 20:00 UTC (6am AEST) uses full 60-day window.
@@ -709,7 +709,7 @@ class PricingEngine:
         arrow-format change list.
         """
         if not self.slack_webhook:
-            logger.warning("SLACK_WEBHOOK_URL not set — skipping Slack notification")
+            logger.warning("SLACK_PRICING_WEBHOOK_URL not set — skipping Slack notification")
             return
 
         n = len(self._updates_pushed)

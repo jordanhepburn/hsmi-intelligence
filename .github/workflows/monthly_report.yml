@@ -31,6 +31,5 @@ jobs:
         env:
           CLOUDBEDS_API_KEY: ${{ secrets.CLOUDBEDS_API_KEY }}
           CLOUDBEDS_PROPERTY_ID: ${{ secrets.CLOUDBEDS_PROPERTY_ID }}
-          SLACK_GROWTH_WEBHOOK_URL: ${{ secrets.SLACK_GROWTH_WEBHOOK_URL }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python reports/monthly_report.py
