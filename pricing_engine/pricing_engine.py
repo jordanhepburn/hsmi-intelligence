@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-WEEKEND_DAYS = {4, 5, 6}  # Friday=4, Saturday=5, Sunday=6 (weekday() values)
+WEEKEND_DAYS = {5}  # Saturday only (weekday() value); Fri + Sun = midweek rate
 AEST = pytz.timezone("Australia/Melbourne")
 
 # Occupancy bracket multipliers applied on top of the day-of-week base rate.
@@ -477,6 +477,11 @@ class PricingEngine:
 
         Bracket multipliers are applied on top of the day-of-week base rate
         (midweek / weekend / peak from Notion tiers).
+
+        Day-of-week classification:
+          - Weekend = Saturday only
+          - Midweek = Mon–Fri and Sunday
+          - Peak    = public holidays / school holidays (overrides day-of-week)
 
         Special cases:
           - Peak dates: use peak base rate, then apply occupancy bracket.
