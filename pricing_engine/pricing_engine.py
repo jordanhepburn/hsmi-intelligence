@@ -135,14 +135,17 @@ class PricingEngine:
 
         # Daily base run at 20:00 UTC (6am AEST) uses full 60-day window.
         # All other runs (hourly) use a 14-day window to stay fast.
+        # Set FORCE_BASE_RUN=1 to trigger a full 60-day run from the command line.
         utc_hour = datetime.utcnow().hour
-        self.is_base_run = (utc_hour == 20)
+        force_base = bool(os.environ.get("FORCE_BASE_RUN", "").strip())
+        self.is_base_run = force_base or (utc_hour == 20)
         lookahead = LOOKAHEAD_DAYS if self.is_base_run else 14
         self.end_date = self.today + timedelta(days=lookahead)
         logger.info(
-            "Run type: %s (UTC hour=%d) — lookahead=%d days",
+            "Run type: %s (UTC hour=%d%s) — lookahead=%d days",
             "DAILY BASE" if self.is_base_run else "HOURLY",
             utc_hour,
+            " FORCE_BASE_RUN" if force_base else "",
             lookahead,
         )
 
