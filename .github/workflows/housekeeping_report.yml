@@ -1,0 +1,32 @@
+name: HSMI Housekeeping Report
+
+on:
+  schedule:
+    # 7:00 am AEST = 21:00 UTC
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+    # Allows manual trigger from the GitHub Actions UI
+
+jobs:
+  housekeeping-report:
+    name: Housekeeping Report
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run housekeeping report
+        env:
+          CLOUDBEDS_API_KEY: ${{ secrets.CLOUDBEDS_API_KEY }}
+          CLOUDBEDS_PROPERTY_ID: ${{ secrets.CLOUDBEDS_PROPERTY_ID }}
+          SLACK_OPERATIONS_WEBHOOK_URL: ${{ secrets.SLACK_OPERATIONS_WEBHOOK_URL }}
+        run: python reports/housekeeping_report.py
