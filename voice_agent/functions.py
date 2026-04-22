@@ -477,8 +477,9 @@ async def hold_room(request: Request):
 
     # -----------------------------------------------------------------------
     # Step 1: Create reservation in Cloudbeds via postReservation
-    # NOTE: Requires the Cloudbeds API key to have reservation_write scope.
-    #       Currently returns "Scope required" — enable in Cloudbeds API settings.
+    # API requires form-encoded (not JSON). Correct payload structure confirmed
+    # via probing. If Cloudbeds returns "could not accommodate", the property
+    # likely needs to enable API-based booking in its channel settings.
     # -----------------------------------------------------------------------
     reservation_id: str | None = None
     cb_status = "not attempted"
@@ -486,21 +487,31 @@ async def hold_room(request: Request):
     if room_code and room_code in ROOM_TYPE_ID_MAP:
         try:
             from config import BASE_RATE_IDS
+            adults_count   = max(int(num_guests), 1)
+            room_type_id   = cfg["id"]
+            rate_id        = BASE_RATE_IDS.get(room_code, "")
+            # Cloudbeds postReservation requires form-encoded arrays for rooms/adults/children
             payload = {
-                "startDate":      checkin_str,
-                "endDate":        checkout_str,
-                "roomTypeID":     cfg["id"],
-                "rateID":         BASE_RATE_IDS.get(room_code, ""),
-                "guestFirstName": first_name,
-                "guestLastName":  last_name,
-                "guestEmail":     guest_email or "",
-                "guestPhone":     guest_phone or "",
-                "adults":         max(int(num_guests), 1),
-                "children":       0,
+                "startDate":               checkin_str,
+                "endDate":                 checkout_str,
+                "guestFirstName":          first_name,
+                "guestLastName":           last_name,
+                "guestEmail":              guest_email or "",
+                "guestPhone":              guest_phone or "",
+                "guestCountry":            "AU",
+                "paymentMethod":           "cash",
+                "rooms[0][roomTypeID]":    room_type_id,
+                "rooms[0][rateID]":        rate_id,
+                "rooms[0][quantity]":      1,
+                "adults[0][roomTypeID]":   room_type_id,
+                "adults[0][quantity]":     adults_count,
+                "children[0][roomTypeID]": room_type_id,
+                "children[0][quantity]":   0,
             }
             logger.info("postReservation payload: %s", payload)
             client = _cb()
-            resp   = client._request("POST", "postReservation", json=payload)
+            # Must use data= (form-encoded), not json= (JSON body)
+            resp   = client._request("POST", "postReservation", data=payload)
             logger.info("postReservation response: %s", resp)
 
             if resp.get("success"):
