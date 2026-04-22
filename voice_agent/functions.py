@@ -368,8 +368,11 @@ async def hold_room(request: Request):
     # Resolve code to friendly room name
     room_label = ROOM_TYPE_ID_MAP.get(room_code, {}).get("name") or room_code or "not specified"
 
+    veronica_id = os.environ.get("VERONICA_SLACK_ID", "").strip()
+    tag = f"<@{veronica_id}> " if veronica_id else ""
+
     slack_text = (
-        f":bell: *New booking request from Cherry*\n"
+        f"{tag}:bell: *New booking request from Cherry*\n"
         f"*Guest:* {guest_name}\n"
         f"*Phone:* {guest_phone or 'not provided'}\n"
         f"*Email:* {guest_email or 'not provided'}\n"
@@ -379,8 +382,12 @@ async def hold_room(request: Request):
         f"*Action required:* confirm and take payment"
     )
 
+    newrez_webhook = os.environ.get("SLACK_NEWREZ_WEBHOOK_URL", "").strip()
     try:
-        _slack(slack_text)
+        if newrez_webhook:
+            requests.post(newrez_webhook, json={"text": slack_text}, timeout=10).raise_for_status()
+        else:
+            logger.warning("SLACK_NEWREZ_WEBHOOK_URL not set — skipping hold_room Slack post")
     except Exception as exc:
         logger.error("hold_room Slack post failed: %s", exc)
 
