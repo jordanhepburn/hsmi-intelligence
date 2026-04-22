@@ -441,24 +441,24 @@ def post_slack_summary(cache: dict, webhook_url: str) -> None:
             lines.append(f"*{day_label}*: ❌ query failed — {sig['error']}")
             continue
 
-        rs = sig.get("regional_signal", "?")
-        pct = sig.get("regional_pct", "?")
+        rs         = sig.get("regional_signal", "NORMAL")
         hsmi_price = sig.get("hsmi_price")
         hsmi_source = sig.get("hsmi_source", "google_hotels")
-        hsmi_tag = " _(Cloudbeds fallback)_" if hsmi_source == "cloudbeds_fallback" else ""
-        hsmi_str = f"A${hsmi_price:.0f}{hsmi_tag}" if hsmi_price else "not listed"
-        avg = f"A${sig['comp_avg']:.0f}" if sig.get("comp_avg") else "N/A"
-        diff = sig.get("hsmi_vs_comp_pct")
-        diff_str = f" ({diff:+d}% vs mid-tier avg)" if diff is not None else ""
+        comp_avg   = sig.get("comp_avg")
+        diff       = sig.get("hsmi_vs_comp_pct")
 
-        lines += [
-            f"*{day_label}*",
-            f"  Regional: {pct}% available — *{rs}*",
-            f"  HSMI: {hsmi_str}{diff_str} | Mid-tier comp avg: {avg}",
-            f"  → {_engine_recommendation(sig)}",
-        ]
+        # Build compact main line
+        hsmi_part = f"HSMI ${hsmi_price:.0f}" if hsmi_price else "HSMI —"
+        if hsmi_source == "cloudbeds_fallback":
+            hsmi_part += "†"            # dagger indicates Cloudbeds fallback
+        avg_part  = f"Comp avg ${comp_avg:.0f}" if comp_avg else "Comp avg N/A"
+        diff_part = f"({diff:+d}%)" if diff is not None else ""
+        rec       = _engine_recommendation(sig)
+        lines.append(
+            f"*{day_label}:* {hsmi_part} | {avg_part} {diff_part} | {rs} → {rec}"
+        )
 
-        # Individual comp prices — verify data quality without checking logs
+        # Comp prices line
         comp_props = sig.get("comp_props", [])
         if comp_props:
             comp_parts = ", ".join(
@@ -466,17 +466,20 @@ def post_slack_summary(cache: dict, webhook_url: str) -> None:
             )
             lines.append(f"  _Comps: {comp_parts}_")
 
-        # Premium benchmarks (reference only — not used in pricing)
+        # Premium benchmarks — only show if at least one has a price
         ref = sig.get("reference_props", [])
-        if ref:
-            ref_parts = ", ".join(
-                f"{r['name'].split(',')[0]} {r['price_str']}" for r in ref if r["price_str"] != "N/A"
-            )
-            if ref_parts:
-                lines.append(f"  _Premium benchmarks: {ref_parts}_")
+        ref_parts = ", ".join(
+            f"{r['name'].split(',')[0]} {r['price_str']}"
+            for r in ref
+            if r.get("price_str") and r["price_str"] != "N/A"
+        )
+        if ref_parts:
+            lines.append(f"  _Premium: {ref_parts}_")
 
         lines.append("")
 
+    if any("†" in l for l in lines):
+        lines.append("_† HSMI not listed on Google Hotels — Cloudbeds avg rate used_")
     lines.append("_Pricing engine running now — rate changes will follow if needed_")
 
     try:

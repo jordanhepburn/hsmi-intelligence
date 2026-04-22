@@ -735,14 +735,13 @@ class PricingEngine:
             logger.warning("Failed to send Slack notification: %s", exc)
 
     def _build_health_check_message(self) -> str:
-        """Daily health check posted when the base run finds no rate changes needed."""
+        """Daily health check posted on each base run."""
         n_dates = (self.end_date - self.today).days
         n_rooms = len(self._room_type_map)
         total_capacity = sum(rt["total_rooms"] for rt in self._room_type_map.values())
 
         lines = [
             f"*HSMI Pricing Engine — {self.today.strftime('%a %d %b %Y')}*",
-            f"✅ Daily base run complete — all rates already optimal",
             f"_{n_dates} dates checked · {n_rooms} room types_",
             f"",
             f"*Occupancy snapshot — next 7 days*",
@@ -784,9 +783,16 @@ class PricingEngine:
         return "\n".join(lines)
 
     def _build_rate_changes_message(self, n: int) -> str:
-        """Rate-change summary posted whenever updates were pushed."""
-        sorted_updates = sorted(self._updates_pushed, key=lambda u: (u["date"], u["code"]))
-        shown = sorted_updates[:20]
+        """Rate-change summary posted whenever updates were pushed (hourly runs)."""
+        # Sort by absolute % change descending — biggest moves first
+        def _sort_key(u: dict) -> float:
+            old, new = u["old_rate"], u["new_rate"]
+            if old and old > 0:
+                return abs((new - old) / old)
+            return 0.0
+
+        sorted_updates = sorted(self._updates_pushed, key=_sort_key, reverse=True)
+        shown = sorted_updates[:5]
 
         lines = []
         for u in shown:
@@ -799,27 +805,18 @@ class PricingEngine:
                 pct    = (new - old) / old * 100
                 change = f"${old:.0f} → ${new:.0f} ({pct:+.0f}%)"
             else:
-                # Old rate not available from Cloudbeds — show new rate only
                 change = f"→ ${new:.0f}"
 
             suffix = f" — {u['bracket']}" if u["bracket"] else ""
             lines.append(f"{arrow} {u['code']} {date_s}: {change}{suffix}")
 
         summary = "\n".join(lines)
-        if n > 20:
-            summary += f"\n… and {n - 20} more"
-
-        enabled = sum(1 for rt in self._room_type_map.values() if rt.get("rate_id"))
-        total   = len(self._room_type_map)
-        push_status = (
-            f"✅ {enabled}/{total} room types active"
-            if enabled
-            else "⛔ No rateIDs — no updates pushed"
-        )
+        if n > 5:
+            summary += f"\n_… and {n - 5} more_"
 
         return (
-            f"*HSMI Pricing Engine — {self.today}*\n"
-            f"_{n} rate update{'s' if n != 1 else ''} pushed — {push_status}_\n\n"
+            f"*HSMI Pricing Engine — {self.today.strftime('%a %d %b %Y')}*\n"
+            f"_{n} rate update{'s' if n != 1 else ''} pushed_\n\n"
             f"{summary}\n\n"
             f"📋 https://www.notion.so/349c905ced6b81d1be30d33aa3cf15eb"
         )
