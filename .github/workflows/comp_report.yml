@@ -1,0 +1,31 @@
+name: HSMI Weekly Comp Report
+
+on:
+  schedule:
+    # 9:00 am AEST Monday = 23:00 UTC Sunday
+    - cron: '0 23 * * 0'
+  workflow_dispatch:
+    # Allows manual trigger from the GitHub Actions UI
+
+jobs:
+  comp-report:
+    name: Weekly Comp Report
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run weekly comp report
+        env:
+          SERP_API_KEY: ${{ secrets.SERP_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python reports/comp_report.py
