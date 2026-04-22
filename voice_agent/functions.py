@@ -462,11 +462,68 @@ async def hold_room(request: Request):
     guest_email  = str(body.get("guest_email", "") or "")
     num_guests   = str(body.get("num_guests", "1") or "1")
 
-    # Resolve code to friendly room name
-    room_label = ROOM_TYPE_ID_MAP.get(room_code, {}).get("name") or room_code or "not specified"
+    # Split guest name into first/last for Cloudbeds
+    name_parts   = guest_name.strip().split()
+    first_name   = name_parts[0] if name_parts else "Guest"
+    last_name    = " ".join(name_parts[1:]) if len(name_parts) > 1 else "."
 
+    # Resolve code to friendly room name and Cloudbeds IDs
+    cfg        = ROOM_TYPE_ID_MAP.get(room_code, {})
+    room_label = cfg.get("name") or room_code or "not specified"
+
+    # -----------------------------------------------------------------------
+    # Step 1: Create reservation in Cloudbeds via postReservation
+    # NOTE: Requires the Cloudbeds API key to have reservation_write scope.
+    #       Currently returns "Scope required" — enable in Cloudbeds API settings.
+    # -----------------------------------------------------------------------
+    reservation_id: str | None = None
+    cb_status = "not attempted"
+
+    if room_code and room_code in ROOM_TYPE_ID_MAP:
+        try:
+            from config import BASE_RATE_IDS
+            payload = {
+                "startDate":      checkin_str,
+                "endDate":        checkout_str,
+                "roomTypeID":     cfg["id"],
+                "rateID":         BASE_RATE_IDS.get(room_code, ""),
+                "guestFirstName": first_name,
+                "guestLastName":  last_name,
+                "guestEmail":     guest_email or "",
+                "guestPhone":     guest_phone or "",
+                "adults":         max(int(num_guests), 1),
+                "children":       0,
+            }
+            logger.info("postReservation payload: %s", payload)
+            client = _cb()
+            resp   = client._request("POST", "postReservation", json=payload)
+            logger.info("postReservation response: %s", resp)
+
+            if resp.get("success"):
+                reservation_id = str(
+                    resp.get("reservationID") or
+                    resp.get("data", {}).get("reservationID") or ""
+                )
+                cb_status = f"created — reservationID {reservation_id}"
+                logger.info("Reservation created: %s", reservation_id)
+            else:
+                cb_status = f"failed — {resp.get('message', 'unknown error')}"
+                logger.warning("postReservation failed: %s", resp)
+
+        except Exception as exc:
+            cb_status = f"error — {exc}"
+            logger.error("postReservation exception: %s", exc)
+    else:
+        cb_status = "skipped — unknown room type"
+        logger.warning("hold_room: unknown room_code '%s', skipping postReservation", room_code)
+
+    # -----------------------------------------------------------------------
+    # Step 2: Notify Slack #api-phone-calls
+    # -----------------------------------------------------------------------
     veronica_id = os.environ.get("VERONICA_SLACK_ID", "").strip()
-    tag = f"<@{veronica_id}> " if veronica_id else ""
+    tag         = f"<@{veronica_id}> " if veronica_id else ""
+
+    res_line = f"*Reservation ID:* {reservation_id}" if reservation_id else f"*Cloudbeds:* {cb_status}"
 
     slack_text = (
         f"{tag}:bell: *New booking request from Cherry*\n"
@@ -476,6 +533,7 @@ async def hold_room(request: Request):
         f"*Dates:* {checkin_str} to {checkout_str}\n"
         f"*Room:* {room_label}\n"
         f"*Guests:* {num_guests}\n"
+        f"{res_line}\n"
         f"*Action required:* confirm and take payment"
     )
 
