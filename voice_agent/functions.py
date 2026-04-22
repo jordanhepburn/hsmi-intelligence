@@ -309,10 +309,13 @@ async def check_availability(request: Request):
             if avail_rec is None or avail_rec["qty"] < 1:
                 continue
 
+            # roomRate is the total stay cost — divide by nights to get nightly average
+            total = avail_rec["rate"]
+            nightly = round(total / nights) if total and nights > 0 else None
             available.append({
                 "code": code,
                 "name": cfg["name"],
-                "rate": avail_rec["rate"],
+                "rate": nightly,
             })
 
         if not available:
