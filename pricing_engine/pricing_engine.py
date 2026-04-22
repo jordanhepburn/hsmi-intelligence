@@ -163,7 +163,8 @@ class PricingEngine:
         # Populated during run()
         self._room_type_map: dict[str, dict] = {}   # code → {id, total_rooms, rate_id}
         self._rate_plan_id: str = ""
-        self._occupancy: dict[str, dict[str, float]] = {}  # date_str → {code: occ_pct}
+        self._occupancy: dict[str, dict[str, float]] = {}         # date_str → {code: occ_pct}
+        self._property_occupancy: dict[str, float] = {}            # date_str → property-wide occ_pct
         self._target_rates: dict[str, dict[str, float]] = {}  # date_str → {code: rate}
         self._current_rates: dict[str, dict[str, float]] = {}  # date_str → {code: rate}
         self._rate_reasons: dict[str, dict[str, str]] = {}    # date_str → {code: bracket_label}
@@ -352,12 +353,20 @@ class PricingEngine:
                     occ_counts[d_str][code] = occ_counts[d_str].get(code, 0) + 1
                 night += timedelta(days=1)
 
-        # Convert counts to percentages
+        # Convert counts to per-type percentages (retained for health check display)
         for d_str, code_counts in occ_counts.items():
             self._occupancy[d_str] = {}
             for code, count in code_counts.items():
-                total = self._room_type_map[code]["total_rooms"]
-                self._occupancy[d_str][code] = min(count / total, 1.0)
+                total_rooms = self._room_type_map[code]["total_rooms"]
+                self._occupancy[d_str][code] = min(count / total_rooms, 1.0)
+
+        # Property-wide occupancy: total rooms booked / total rooms available across all types
+        total_property_rooms = sum(rt["total_rooms"] for rt in self._room_type_map.values())
+        for d_str, code_counts in occ_counts.items():
+            total_booked = sum(code_counts.values())
+            self._property_occupancy[d_str] = (
+                min(total_booked / total_property_rooms, 1.0) if total_property_rooms else 0.0
+            )
 
         return self._occupancy
 
@@ -521,7 +530,7 @@ class PricingEngine:
                 if code not in self._room_type_map:
                     continue
 
-                occ_pct = self._occupancy.get(d_str, {}).get(code, 0.0)
+                occ_pct = self._property_occupancy.get(d_str, 0.0)
                 floor_  = cfg["floor"]
                 ceiling_ = cfg["ceiling"]
 
@@ -555,7 +564,7 @@ class PricingEngine:
                         self._rate_reasons.setdefault(d_str, {})[code] = "EVENING floor"
                     self._target_rates[d_str][code] = rate
                     logger.info(
-                        "%s %s: $%.0f (%.0f%% occ | %s)",
+                        "%s %s: $%.0f (%.0f%% property occ | %s)",
                         code, d_str, rate, occ_pct * 100, reason,
                     )
                     continue
@@ -592,7 +601,7 @@ class PricingEngine:
                     clamp_note = f"→ ${final_rate:.0f}"
 
                 logger.info(
-                    "%s %s: $%.0f %s × %.2f (%s occ) = $%.0f %s",
+                    "%s %s: $%.0f %s × %.2f (%s property occ) = $%.0f %s",
                     code, d_str,
                     base_rate, base_label,
                     multiplier, bracket_label,
@@ -618,7 +627,7 @@ class PricingEngine:
                     )
                     final_rate = comp_final
 
-                reason = f"{bracket_label} occ"
+                reason = f"{bracket_label} property occ"
                 if comp_mult != 1.00:
                     reason += f" + comp {comp_label}"
                 self._rate_reasons.setdefault(d_str, {})[code] = reason
@@ -650,7 +659,7 @@ class PricingEngine:
                     continue
 
                 current_rate = self._current_rates.get(d_str, {}).get(code)
-                occ_pct = self._occupancy.get(d_str, {}).get(code, 0.0)
+                occ_pct = self._property_occupancy.get(d_str, 0.0)
 
                 # Determine direction for logging
                 if current_rate is None:
@@ -669,7 +678,7 @@ class PricingEngine:
                 # Decide whether to push
                 if diff > RATE_CHANGE_THRESHOLD:
                     logger.info(
-                        "%s %s: %s to $%.0f (%.0f%% occ, %dd out)",
+                        "%s %s: %s to $%.0f (%.0f%% property occ, %dd out)",
                         code, d_str, direction, new_rate, occ_pct * 100, days_out,
                     )
                     if not rt.get("rate_id"):
