@@ -353,6 +353,95 @@ async def check_availability(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# 1b. get_rate_breakdown
+# ---------------------------------------------------------------------------
+
+
+@app.post("/functions/get_rate_breakdown")
+async def get_rate_breakdown(request: Request):
+    body = _args(await request.json())
+    checkin_str  = str(body.get("checkin_date", "") or "").strip()
+    checkout_str = str(body.get("checkout_date", "") or "").strip()
+    room_code    = str(body.get("room_type_code", "") or body.get("room_type", "") or "").upper().strip()
+
+    if not checkin_str or not checkout_str or not room_code:
+        return JSONResponse({
+            "result": "I need the check-in date, check-out date, and room type to give you a breakdown."
+        })
+
+    try:
+        checkin  = _parse_date(checkin_str)
+        checkout = _parse_date(checkout_str)
+    except (ValueError, TypeError):
+        return JSONResponse({"result": "I couldn't understand those dates."})
+
+    nights = (checkout - checkin).days
+    if nights < 1:
+        return JSONResponse({"result": "The check-out date needs to be after the check-in date."})
+
+    cfg = ROOM_TYPE_ID_MAP.get(room_code)
+    if not cfg:
+        return JSONResponse({"result": f"I don't recognise the room type {room_code}. Could you clarify?"})
+
+    def _ordinal(n: int) -> str:
+        return "th" if 11 <= n <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+    def _fmt_day(d: date) -> str:
+        return d.strftime("%A the %-d") + _ordinal(d.day) + d.strftime(" of %B")
+
+    try:
+        client = _cb()
+
+        # getRate with detailedRates=true returns roomRateDetailed — one entry per night
+        resp   = client._get("getRate", params={
+            "roomTypeID":    cfg["id"],
+            "startDate":     checkin_str,
+            "endDate":       checkout_str,
+            "detailedRates": "true",
+        })
+        detail = resp.get("data", {}).get("roomRateDetailed", [])
+
+        if not detail:
+            return JSONResponse({
+                "result": "I couldn't retrieve the nightly rates right now. Please call us and we'll go through it with you."
+            })
+
+        parts: list[str] = []
+        total = 0.0
+        for entry in detail:
+            try:
+                d    = date.fromisoformat(str(entry["date"]))
+                rate = float(entry["rate"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            total += rate
+            parts.append(f"{_fmt_day(d)} is ${rate:.0f}")
+
+        if not parts:
+            return JSONResponse({"result": "I couldn't find rate details for those dates."})
+
+        nights_word = "night" if nights == 1 else "nights"
+        breakdown   = ", ".join(parts)
+        room_name   = cfg["name"]
+
+        return JSONResponse({
+            "result": (
+                f"For the {room_name}: {breakdown}. "
+                f"That's ${total:.0f} total for {nights} {nights_word}."
+            )
+        })
+
+    except Exception as exc:
+        logger.exception("get_rate_breakdown error: %s", exc)
+        return JSONResponse({
+            "result": (
+                "I'm having trouble fetching the rate breakdown right now. "
+                f"Please call us on {_PHONE} and we'll go through it with you."
+            )
+        })
+
+
+# ---------------------------------------------------------------------------
 # 2. hold_room
 # ---------------------------------------------------------------------------
 
@@ -385,12 +474,12 @@ async def hold_room(request: Request):
         f"*Action required:* confirm and take payment"
     )
 
-    newrez_webhook = os.environ.get("SLACK_NEWREZ_WEBHOOK_URL", "").strip()
+    phone_calls_webhook = os.environ.get("SLACK_PHONE_CALLS_WEBHOOK_URL", "").strip()
     try:
-        if newrez_webhook:
-            requests.post(newrez_webhook, json={"text": slack_text}, timeout=10).raise_for_status()
+        if phone_calls_webhook:
+            requests.post(phone_calls_webhook, json={"text": slack_text}, timeout=10).raise_for_status()
         else:
-            logger.warning("SLACK_NEWREZ_WEBHOOK_URL not set — skipping hold_room Slack post")
+            logger.warning("SLACK_PHONE_CALLS_WEBHOOK_URL not set — skipping hold_room Slack post")
     except Exception as exc:
         logger.error("hold_room Slack post failed: %s", exc)
 
@@ -530,8 +619,12 @@ async def log_message(request: Request):
         f"*Time:* {_aest_now()}"
     )
 
+    phone_calls_webhook = os.environ.get("SLACK_PHONE_CALLS_WEBHOOK_URL", "").strip()
     try:
-        _slack(slack_text)
+        if phone_calls_webhook:
+            requests.post(phone_calls_webhook, json={"text": slack_text}, timeout=10).raise_for_status()
+        else:
+            logger.warning("SLACK_PHONE_CALLS_WEBHOOK_URL not set — skipping log_message Slack post")
     except Exception as exc:
         logger.error("log_message Slack post failed: %s", exc)
 
