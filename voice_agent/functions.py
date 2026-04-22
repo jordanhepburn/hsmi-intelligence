@@ -270,26 +270,35 @@ async def check_availability(request: Request):
     try:
         client = _cb()
 
-        # Fetch available room types for the stay window
-        avail_resp = client._get("getAvailableRoomTypes", params={
+        # Fetch available room types for the stay window.
+        # Response: data[0].propertyRooms — one entry per rate plan per room type.
+        avail_resp    = client._get("getAvailableRoomTypes", params={
             "startDate": checkin_str,
             "endDate":   checkout_str,
         })
-        avail_data  = avail_resp.get("data", avail_resp)
-        avail_items = (
-            list(avail_data.values()) if isinstance(avail_data, dict)
-            else avail_data if isinstance(avail_data, list)
-            else []
-        )
+        avail_data    = avail_resp.get("data", [])
+        property_obj  = avail_data[0] if isinstance(avail_data, list) and avail_data else {}
+        property_rooms = property_obj.get("propertyRooms", [])
 
-        # Map roomTypeID → availability record
+        # Group by roomTypeID: max roomsAvailable + rate from the "default" plan
         avail_by_id: dict[str, dict] = {}
-        for item in avail_items:
-            rt_id = str(
-                item.get("roomTypeID") or item.get("id") or ""
-            )
-            if rt_id:
-                avail_by_id[rt_id] = item
+        for item in property_rooms:
+            rt_id = str(item.get("roomTypeID") or "")
+            if not rt_id:
+                continue
+            qty  = int(item.get("roomsAvailable") or 0)
+            rate = float(item.get("roomRate") or 0) or None
+            plan = str(
+                item.get("ratePlanNamePublic") or
+                item.get("ratePlanNamePrivate") or ""
+            ).lower()
+            if rt_id not in avail_by_id:
+                avail_by_id[rt_id] = {"qty": qty, "rate": None}
+            else:
+                avail_by_id[rt_id]["qty"] = max(avail_by_id[rt_id]["qty"], qty)
+            # Prefer the default (rack) rate plan for the price Cherry quotes
+            if "default" in plan or avail_by_id[rt_id]["rate"] is None:
+                avail_by_id[rt_id]["rate"] = rate
 
         available: list[dict] = []
         for code, cfg in ROOM_TYPE_ID_MAP.items():
@@ -297,30 +306,13 @@ async def check_availability(request: Request):
                 continue
             rt_id    = cfg["id"]
             avail_rec = avail_by_id.get(rt_id)
-
-            # If the API returned nothing, treat all known types as potentially available
-            if avail_items and avail_rec is None:
-                continue  # not in availability response → not available
-
-            if avail_rec is not None:
-                qty = int(
-                    avail_rec.get("totalAvailable") or
-                    avail_rec.get("availableRooms") or
-                    avail_rec.get("qty") or 0
-                )
-                if qty < 1:
-                    continue
-
-            # Get nightly rate for checkin date
-            rates   = client.get_rate(rt_id, checkin, checkout)
-            nightly = rates.get(checkin_str)
-            if nightly is None and rates:
-                nightly = next(iter(rates.values()))
+            if avail_rec is None or avail_rec["qty"] < 1:
+                continue
 
             available.append({
-                "code":  code,
-                "name":  cfg["name"],
-                "rate":  nightly,
+                "code": code,
+                "name": cfg["name"],
+                "rate": avail_rec["rate"],
             })
 
         if not available:
