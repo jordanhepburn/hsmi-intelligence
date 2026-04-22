@@ -4,7 +4,7 @@ HSMI Voice Agent Functions Server
 FastAPI webhook server for Cherry (HSMI Retell AI voice agent).
 
 Retell POSTs to /functions/{function_name} with the function arguments in the
-request body.  Each handler returns {"response": "..."} — the text Cherry
+request body.  Each handler returns {"result": "..."} — the text Cherry
 speaks back to the caller.
 
 Environment variables:
@@ -247,7 +247,7 @@ async def check_availability(request: Request):
 
     if not checkin_str or not checkout_str:
         return JSONResponse({
-            "response": "I need both a check-in and check-out date to check availability."
+            "result": "I need both a check-in and check-out date to check availability."
         })
 
     try:
@@ -255,7 +255,7 @@ async def check_availability(request: Request):
         checkout = _parse_date(checkout_str)
     except (ValueError, TypeError):
         return JSONResponse({
-            "response": (
+            "result": (
                 "I couldn't understand those dates. "
                 "Could you say them as, for example, the fifteenth of June?"
             )
@@ -264,7 +264,7 @@ async def check_availability(request: Request):
     nights = (checkout - checkin).days
     if nights < 1:
         return JSONResponse({
-            "response": "The check-out date needs to be after the check-in date."
+            "result": "The check-out date needs to be after the check-in date."
         })
 
     try:
@@ -317,7 +317,7 @@ async def check_availability(request: Request):
 
         if not available:
             return JSONResponse({
-                "response": "Unfortunately we are fully booked for those dates."
+                "result": "Unfortunately we are fully booked for those dates."
             })
 
         nights_word = "night" if nights == 1 else "nights"
@@ -332,7 +332,7 @@ async def check_availability(request: Request):
             rooms_list = ", ".join(parts[:-1]) + f", and {parts[-1]}"
 
         return JSONResponse({
-            "response": (
+            "result": (
                 f"Great news! For {_fmt_date(checkin)} to {_fmt_date(checkout)} "
                 f"— {nights} {nights_word} — we have: {rooms_list}. "
                 f"Would you like me to hold a room for you?"
@@ -342,7 +342,7 @@ async def check_availability(request: Request):
     except Exception as exc:
         logger.exception("check_availability error: %s", exc)
         return JSONResponse({
-            "response": (
+            "result": (
                 "I'm having trouble checking availability right now. "
                 f"Please call us directly on {_PHONE} and we'll be happy to help."
             )
@@ -385,7 +385,7 @@ async def hold_room(request: Request):
         logger.error("hold_room Slack post failed: %s", exc)
 
     return JSONResponse({
-        "response": (
+        "result": (
             "I've noted your reservation request. "
             "Our team will call you within the hour to confirm and arrange payment."
         )
@@ -406,7 +406,7 @@ async def check_late_checkout(request: Request):
 
     if not room_number or not checkout_date:
         return JSONResponse({
-            "response": "I need your room number and checkout date to check late checkout availability."
+            "result": "I need your room number and checkout date to check late checkout availability."
         })
 
     try:
@@ -414,7 +414,7 @@ async def check_late_checkout(request: Request):
         next_day  = co_date + timedelta(days=1)
     except (ValueError, TypeError):
         return JSONResponse({
-            "response": "I couldn't understand that date. Could you confirm your checkout date?"
+            "result": "I couldn't understand that date. Could you confirm your checkout date?"
         })
 
     try:
@@ -425,7 +425,7 @@ async def check_late_checkout(request: Request):
 
         if occupied:
             return JSONResponse({
-                "response": (
+                "result": (
                     "Unfortunately your room is needed the next day so we can't extend past 10am. "
                     "I can offer you a 10:30am checkout if that helps."
                 )
@@ -448,7 +448,7 @@ async def check_late_checkout(request: Request):
                 logger.warning("putReservationNote failed for %s: %s", res_id, exc)
 
         return JSONResponse({
-            "response": (
+            "result": (
                 "Late checkout until 12 noon is available for your room. "
                 "I've added a note to your booking — no need to rush out in the morning."
             )
@@ -457,7 +457,7 @@ async def check_late_checkout(request: Request):
     except Exception as exc:
         logger.exception("check_late_checkout error: %s", exc)
         return JSONResponse({
-            "response": (
+            "result": (
                 "I'm having trouble checking that right now. "
                 f"Please call us on {_PHONE} and we'll sort it out for you."
             )
@@ -490,7 +490,7 @@ async def log_maintenance(request: Request):
         logger.error("log_maintenance Slack post failed: %s", exc)
 
     return JSONResponse({
-        "response": (
+        "result": (
             "I've logged that with our maintenance team. "
             "Someone will attend to your room as soon as possible."
         )
@@ -526,7 +526,7 @@ async def log_message(request: Request):
         logger.error("log_message Slack post failed: %s", exc)
 
     return JSONResponse({
-        "response": (
+        "result": (
             "Thank you, I've passed that on to our management team. "
             "They'll be in touch."
         )
@@ -582,7 +582,7 @@ async def get_checkin_instructions(request: Request):
 
         if not matched_res_id:
             return JSONResponse({
-                "response": (
+                "result": (
                     "I couldn't find a booking under that name for today. "
                     "Could you double-check the name, or call us on "
                     f"{_PHONE} and we'll look it up for you?"
@@ -596,14 +596,14 @@ async def get_checkin_instructions(request: Request):
 
         if not room_num:
             return JSONResponse({
-                "response": (
+                "result": (
                     "I found your booking but couldn't retrieve the room number. "
                     f"Please call us on {_PHONE} and we'll assist you right away."
                 )
             })
 
         return JSONResponse({
-            "response": (
+            "result": (
                 f"Welcome! Your room is number {room_num}. "
                 "You should have received your access instructions by SMS — "
                 "if you're having trouble, please let me know what the issue is and I'll help."
@@ -613,7 +613,7 @@ async def get_checkin_instructions(request: Request):
     except Exception as exc:
         logger.exception("get_checkin_instructions error: %s", exc)
         return JSONResponse({
-            "response": (
+            "result": (
                 "I'm having trouble retrieving your booking right now. "
                 f"Please call us on {_PHONE} and we'll get you sorted."
             )
