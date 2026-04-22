@@ -17,11 +17,13 @@ Usage:
   python pricing_engine/pricing_engine.py
 """
 
+import json
 import logging
 import os
 import sys
 import traceback
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 import pytz
@@ -162,6 +164,7 @@ class PricingEngine:
         self._target_rates: dict[str, dict[str, float]] = {}  # date_str → {code: rate}
         self._current_rates: dict[str, dict[str, float]] = {}  # date_str → {code: rate}
         self._rate_reasons: dict[str, dict[str, str]] = {}    # date_str → {code: bracket_label}
+        self._competitor_signals: dict[str, dict] = {}         # date_str → signal dict from cache
         # Each entry: {code, date, old_rate, new_rate, direction, bracket}
         self._updates_pushed: list[dict] = []
 
@@ -177,6 +180,7 @@ class PricingEngine:
             self._load_rate_plans()
             self._calculate_occupancy()
             self._fetch_current_rates()   # must precede _calculate_rates (EVENING window needs live rates)
+            self._load_competitor_cache()
             self._calculate_rates()
             self._push_updates()
             self._send_slack_summary()
@@ -380,6 +384,90 @@ class PricingEngine:
                 logger.warning("Could not fetch current rates for %s: %s", code, exc)
 
     # ------------------------------------------------------------------
+    # Competitor cache
+    # ------------------------------------------------------------------
+
+    def _load_competitor_cache(self) -> None:
+        """
+        Load competitor signal cache written by competitor_signal.py.
+
+        Cache is valid for 24 hours. If the file is missing (hourly runs on
+        ephemeral runners never have it) or stale, log a warning and leave
+        ``self._competitor_signals`` empty — occupancy brackets apply unchanged.
+        """
+        cache_path = Path(_HERE) / "competitor_cache.json"
+
+        if not cache_path.exists():
+            logger.info("Competitor cache not found — competitor adjustment disabled for this run")
+            return
+
+        try:
+            data = json.loads(cache_path.read_text())
+            updated_at_str = data.get("updated_at", "")
+            updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+            age_hours = (datetime.now(tz=timezone.utc) - updated_at).total_seconds() / 3600
+
+            if age_hours > 24:
+                logger.warning(
+                    "Competitor cache is %.1fh old (limit 24h) — skipping competitor adjustment",
+                    age_hours,
+                )
+                return
+
+            self._competitor_signals = data.get("signals", {})
+            logger.info(
+                "Competitor cache loaded: %.1fh old, signals for %s",
+                age_hours,
+                ", ".join(self._competitor_signals.keys()) or "none",
+            )
+            for d_str, sig in self._competitor_signals.items():
+                if "error" in sig:
+                    logger.warning("  %s: cached error — %s", d_str, sig["error"])
+                else:
+                    logger.info(
+                        "  %s: %s | HSMI %s | comp avg %s | HSMI vs comp %s%%",
+                        d_str,
+                        sig.get("regional_signal", "?"),
+                        f"A${sig['hsmi_price']:.0f}" if sig.get("hsmi_price") else "N/A",
+                        f"A${sig['comp_avg']:.0f}" if sig.get("comp_avg") else "N/A",
+                        sig.get("hsmi_vs_comp_pct", "N/A"),
+                    )
+        except Exception as exc:
+            logger.warning("Failed to load competitor cache: %s — skipping competitor adjustment", exc)
+
+    def _competitor_multiplier_for(self, d_str: str, occ_rate: float) -> tuple[float, str]:
+        """
+        Return (multiplier, label) from the competitor cache for a specific date.
+
+        Comparison is between ``occ_rate`` (the occupancy-bracket rate we plan
+        to set) and the competitor average visible on Google Hotels.
+
+        Returns (1.00, "") if no signal is available for this date.
+        """
+        sig = self._competitor_signals.get(d_str)
+        if not sig or "error" in sig:
+            return 1.00, ""
+
+        rs = sig.get("regional_signal", "NORMAL")
+
+        if rs == "SOLD_OUT":
+            return 1.35, "regional SOLD_OUT"
+        elif rs == "CRITICAL":
+            return 1.20, "regional CRITICAL"
+        elif rs == "HIGH":
+            return 1.10, "regional HIGH"
+        else:
+            # NORMAL: compare our planned rate vs comp average
+            comp_avg = sig.get("comp_avg")
+            if comp_avg and occ_rate > 0:
+                ratio = occ_rate / comp_avg
+                if ratio < 0.85:
+                    return 1.08, f"underpriced vs comp avg A${comp_avg:.0f}"
+                elif ratio < 1.00:
+                    return 1.05, f"below comp avg A${comp_avg:.0f}"
+            return 1.00, ""
+
+    # ------------------------------------------------------------------
     # Step 5: Calculate target rates
     # ------------------------------------------------------------------
 
@@ -504,7 +592,28 @@ class PricingEngine:
                     clamp_note,
                 )
 
-                self._rate_reasons.setdefault(d_str, {})[code] = f"{bracket_label} occ"
+                # ── Apply competitor signal (if cache is loaded for this date) ──
+                comp_mult, comp_label = self._competitor_multiplier_for(d_str, final_rate)
+                if comp_mult != 1.00:
+                    comp_raw = final_rate * comp_mult
+                    comp_rounded = round(comp_raw)
+                    comp_final = max(floor_, min(ceiling_, comp_rounded))
+                    if comp_final < comp_rounded:
+                        comp_note = f"→ capped at ${comp_final:.0f} ceiling"
+                    elif comp_final > comp_rounded:
+                        comp_note = f"→ floored at ${comp_final:.0f} floor"
+                    else:
+                        comp_note = f"→ ${comp_final:.0f}"
+                    logger.info(
+                        "%s %s: competitor × %.2f (%s) = $%.0f %s",
+                        code, d_str, comp_mult, comp_label, comp_raw, comp_note,
+                    )
+                    final_rate = comp_final
+
+                reason = f"{bracket_label} occ"
+                if comp_mult != 1.00:
+                    reason += f" + comp {comp_label}"
+                self._rate_reasons.setdefault(d_str, {})[code] = reason
                 self._target_rates[d_str][code] = final_rate
 
             current += timedelta(days=1)

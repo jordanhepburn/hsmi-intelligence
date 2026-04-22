@@ -1,0 +1,45 @@
+name: HSMI Competitor Signal + Rate Push
+
+on:
+  schedule:
+    # 12:00 pm AEST = 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # Allows manual trigger from the GitHub Actions UI
+
+jobs:
+  competitor-signal:
+    name: Competitor Signal + Rate Push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Step 1: query SerpApi (exactly 2 calls), write competitor_cache.json,
+      # post Slack signal summary.
+      - name: Run competitor signal
+        env:
+          SERP_API_KEY: ${{ secrets.SERP_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python pricing_engine/competitor_signal.py
+
+      # Step 2: run the full pricing engine — it reads competitor_cache.json
+      # from the same workspace and applies the competitor multiplier on top
+      # of occupancy brackets before pushing to Cloudbeds.
+      - name: Run pricing engine with competitor signal
+        env:
+          CLOUDBEDS_API_KEY: ${{ secrets.CLOUDBEDS_API_KEY }}
+          CLOUDBEDS_PROPERTY_ID: ${{ secrets.CLOUDBEDS_PROPERTY_ID }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python pricing_engine/pricing_engine.py
