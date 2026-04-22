@@ -292,21 +292,40 @@ def _process_response(data: dict) -> dict:
 # Cloudbeds fallback — used when HSMI is not listed on Google Hotels
 # ---------------------------------------------------------------------------
 
-_TWI_ROOM_TYPE_ID = "8444747503112281"   # Twin Room — reference rate type
-
-
 def _fetch_cloudbeds_rate(cb_api_key: str, cb_property_id: str, d: date) -> Optional[float]:
     """
-    Fetch HSMI's TWI base rate from Cloudbeds for date d.
+    Fetch the simple average of all 6 BASE room-type rates from Cloudbeds for
+    date d, using the room type IDs from ROOM_TYPE_ID_MAP (keyed via
+    BASE_RATE_IDS so we only query rate plans that are publicly listed).
 
-    Returns the rate as a float, or None if unavailable.
+    Returns the average as a float, or None if no rates could be retrieved.
     Silently catches all errors so a Cloudbeds outage never blocks the signal.
     """
     try:
         from cloudbeds_client import CloudbedsClient  # noqa: PLC0415
+        from config import BASE_RATE_IDS, ROOM_TYPE_ID_MAP  # noqa: PLC0415
+
         client = CloudbedsClient(api_key=cb_api_key, property_id=cb_property_id)
-        rates = client.get_rate(_TWI_ROOM_TYPE_ID, d, d + timedelta(days=1))
-        return rates.get(d.strftime("%Y-%m-%d"))
+        d_str = d.strftime("%Y-%m-%d")
+        checkout = d + timedelta(days=1)
+
+        fetched: list[float] = []
+        for code in BASE_RATE_IDS:
+            room_type_id = ROOM_TYPE_ID_MAP[code]["id"]
+            try:
+                rates = client.get_rate(room_type_id, d, checkout)
+                val = rates.get(d_str)
+                if val is not None:
+                    fetched.append(val)
+                    logger.debug("  Cloudbeds %s: A$%.0f", code, val)
+            except Exception as exc:
+                logger.debug("  Cloudbeds %s rate fetch failed: %s", code, exc)
+
+        if not fetched:
+            return None
+        avg = sum(fetched) / len(fetched)
+        logger.info("  Cloudbeds rates fetched: %s → avg A$%.0f", fetched, avg)
+        return avg
     except Exception as exc:
         logger.warning("Cloudbeds rate fallback failed for %s: %s", d, exc)
         return None
@@ -358,7 +377,8 @@ def build_and_write_cache(api_key: str) -> dict:
                 cb_rate = _fetch_cloudbeds_rate(cb_api_key, cb_property_id, d)
                 if cb_rate is not None:
                     logger.info(
-                        "HSMI not on Google Hotels — using Cloudbeds TWI rate: A$%.0f", cb_rate
+                        "HSMI not on Google Hotels — using Cloudbeds avg rate across all room types: A$%.0f",
+                        cb_rate,
                     )
                     signal["hsmi_price"]  = cb_rate
                     signal["hsmi_source"] = "cloudbeds_fallback"
