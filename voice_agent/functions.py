@@ -8,11 +8,16 @@ request body.  Each handler returns {"result": "..."} — the text Cherry
 speaks back to the caller.
 
 Environment variables:
-  CLOUDBEDS_API_KEY            — Cloudbeds API key
-  CLOUDBEDS_PROPERTY_ID        — Cloudbeds property ID
-  SLACK_OPERATIONS_WEBHOOK_URL — Slack #operations incoming webhook
+  CLOUDBEDS_API_KEY              — Cloudbeds API key
+  CLOUDBEDS_PROPERTY_ID          — Cloudbeds property ID
+  SLACK_OPERATIONS_WEBHOOK_URL   — Slack #operations incoming webhook
+  SLACK_PHONE_CALLS_WEBHOOK_URL  — Slack #phone-calls incoming webhook
+  RETELL_API_KEY                 — Retell API key (used to verify webhook signatures)
+  VERONICA_SLACK_ID              — Slack member ID for Veronica (tagged on hold_room)
 """
 
+import hashlib
+import hmac
 import logging
 import os
 import re
@@ -721,3 +726,51 @@ async def get_checkin_instructions(request: Request):
                 f"Please call us on {_PHONE} and we'll get you sorted."
             )
         })
+
+
+# ---------------------------------------------------------------------------
+# Retell webhook — call_started event
+# Injects current_date and current_time as dynamic variables at call start.
+# ---------------------------------------------------------------------------
+
+def _verify_retell_signature(body: bytes, signature: str) -> bool:
+    """
+    Verify Retell's x-retell-signature header.
+
+    Retell signs the raw request body with the API key using HMAC-SHA256
+    and base64-encodes the result.
+    """
+    import base64
+    secret = os.environ.get("RETELL_API_KEY", "").strip()
+    if not secret:
+        logger.warning("RETELL_API_KEY not set — skipping signature verification")
+        return True  # allow through if unconfigured (dev/test)
+    expected = base64.b64encode(
+        hmac.new(secret.encode(), body, hashlib.sha256).digest()
+    ).decode()
+    return hmac.compare_digest(expected, signature)
+
+
+@app.post("/webhook/call-started")
+async def call_started(request: Request):
+    body      = await request.body()
+    signature = request.headers.get("x-retell-signature", "")
+
+    if signature and not _verify_retell_signature(body, signature):
+        logger.warning("Invalid Retell signature — rejecting call_started webhook")
+        return JSONResponse({"error": "invalid signature"}, status_code=401)
+
+    now        = datetime.now(AEST)
+    # "Wednesday 22 April 2026"
+    current_date = now.strftime("%A %-d %B %Y")
+    # "20:30"
+    current_time = now.strftime("%H:%M")
+
+    logger.info("call_started webhook — injecting date=%s time=%s", current_date, current_time)
+
+    return JSONResponse({
+        "dynamic_variables": {
+            "current_date": current_date,
+            "current_time": current_time,
+        }
+    })
