@@ -2,10 +2,10 @@ name: HSMI Pricing Engine
 
 on:
   schedule:
-    # 8:00 pm UTC = 6:00 am AEST — daily base run
+    # 8:00 pm UTC = 6:00 am AEST — daily base run (60-day pricing)
     - cron: '0 20 * * *'
-    # Hourly 9am–11pm AEST = 11pm–1pm UTC (hours 23 and 0–13)
-    - cron: '0 0-13,23 * * *'
+    # Hourly 6am–7pm AEST = 8pm–9am UTC (hours 20–23 and 0–9)
+    - cron: '0 20-23,0-9 * * *'
   workflow_dispatch:
     # Allows manual trigger from the GitHub Actions UI
 
