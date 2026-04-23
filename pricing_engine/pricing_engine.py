@@ -136,18 +136,18 @@ class PricingEngine:
         self.slack_webhook = os.environ.get("SLACK_PRICING_WEBHOOK_URL", "").strip()
         self.today = date.today()
 
-        # Daily base run at 20:00 UTC (6am AEST) uses full 60-day window.
-        # All other runs (hourly) use a 14-day window to stay fast.
-        # Set FORCE_BASE_RUN=1 to trigger a full 60-day run from the command line.
-        utc_hour = datetime.utcnow().hour
-        force_base = bool(os.environ.get("FORCE_BASE_RUN", "").strip())
-        self.is_base_run = force_base or (utc_hour == 20)
+        # GitHub schedule trigger → daily 60-day base run.
+        # workflow_dispatch (cron-job.org hourly) → 14-day window.
+        # Set FORCE_BASE_RUN=1 to force a base run from the command line.
+        force_base   = bool(os.environ.get("FORCE_BASE_RUN", "").strip())
+        github_event = os.environ.get("GITHUB_EVENT_NAME", "").strip()
+        self.is_base_run = force_base or (github_event == "schedule")
         lookahead = LOOKAHEAD_DAYS if self.is_base_run else 14
         self.end_date = self.today + timedelta(days=lookahead)
         logger.info(
-            "Run type: %s (UTC hour=%d%s) — lookahead=%d days",
+            "Run type: %s (event=%s%s) — lookahead=%d days",
             "DAILY BASE" if self.is_base_run else "HOURLY",
-            utc_hour,
+            github_event or "unknown",
             " FORCE_BASE_RUN" if force_base else "",
             lookahead,
         )
