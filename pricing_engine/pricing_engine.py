@@ -514,6 +514,7 @@ class PricingEngine:
         logger.info("Step 5: Calculating target rates")
 
         time_window, time_str = _get_time_window()
+        utc_hour = datetime.utcnow().hour
         window_desc = {
             "MORNING":   "full brackets active",
             "AFTERNOON": "capped increases (+20% max), discount urgency +5pp",
@@ -569,6 +570,17 @@ class PricingEngine:
                     logger.info(
                         "%s %s: $%.0f (%.0f%% property occ | %s)",
                         code, d_str, rate, occ_pct * 100, reason,
+                    )
+                    continue
+
+                # ── Special case: same-day 3pm+ AEST (UTC≥5), occ <40% — drop to floor ──
+                if is_same_day and utc_hour >= 5 and occ_pct < 0.40:
+                    rate = math.ceil(max(floor_, min(ceiling_, cfg["floor"])) / 5) * 5
+                    self._target_rates[d_str][code] = rate
+                    self._rate_reasons.setdefault(d_str, {})[code] = "3PM floor"
+                    logger.info(
+                        "%s %s: $%.0f (%.0f%% property occ | 3PM FLOOR: same-day occ <40%%)",
+                        code, d_str, rate, occ_pct * 100,
                     )
                     continue
 
