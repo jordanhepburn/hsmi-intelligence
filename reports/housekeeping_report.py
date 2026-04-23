@@ -175,9 +175,12 @@ class HousekeepingReport:
             condition = (room.get("roomCondition") or "").lower().strip()
             date_str  = str(room.get("date") or "")
 
-            # Extract room number from name
+            # Extract room number from name — skip if unparseable
             m = re.search(r"\b(\d+)\b", room_name)
-            room_num  = int(m.group(1)) if m else 0
+            if not m:
+                logger.debug("Skipping room with unparseable name: %r", room_name)
+                continue
+            room_num  = int(m.group(1))
             room_type = ROOMS.get(room_num, "?")
 
             # Look up arriving guest for this room
