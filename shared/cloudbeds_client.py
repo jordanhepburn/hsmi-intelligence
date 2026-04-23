@@ -200,7 +200,6 @@ class CloudbedsClient:
             "roomTypeID": room_type_id,
             "startDate": start_date.strftime("%Y-%m-%d"),
             "endDate": end_date.strftime("%Y-%m-%d"),
-            "detailedRates": "true",
         }
         response = self._get("getRate", params=params)
 
