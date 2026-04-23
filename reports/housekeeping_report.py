@@ -4,20 +4,19 @@ HSMI Housekeeping Report
 Posts a daily room-by-room housekeeping status to Slack #operations at 7am AEST
 (9pm UTC, cron '0 21 * * *').
 
-For each of the 18 physical rooms the report shows:
-  - Clean?:    TURNOVER | CHECKOUT | STAYOVER | - (no action)
-  - Check-in?: Guest surname + party size if arriving today, else -
-  - Notes:     Special keywords found in reservation notes
+Room statuses (derived from getHousekeepingStatus):
+  🔴 TURNOVER  — check-out today AND check-in today (full clean + prepare for new guest)
+  🟠 CHECKOUT  — check-out today, no new arrival (full clean for departure)
+  🟡 DIRTY     — vacant but dirty (shows "dirty since <day>")
+  🟢 CHECKIN   — guest arriving, room already clean
+  ⚪ VACANT    — empty and clean, no action needed
 
-Room statuses:
-  TURNOVER  — checkout today AND checkin today (full service + prepare for new guest)
-  CHECKOUT  — checking out today, no new arrival (clean for departure)
-  STAYOVER  — guest in house, no movement today (room serviced on request)
-  -         — vacant or CHECKIN-only (no outgoing guest; prepare but no full clean)
+Rows are sorted by priority (🔴 first, ⚪ last) so Dwayne scans top-to-bottom
+and stops at the white rows.
 
 Environment variables:
-  CLOUDBEDS_API_KEY          — Cloudbeds API key (required)
-  CLOUDBEDS_PROPERTY_ID      — Cloudbeds property ID (required)
+  CLOUDBEDS_API_KEY            — Cloudbeds API key (required)
+  CLOUDBEDS_PROPERTY_ID        — Cloudbeds property ID (required)
   SLACK_OPERATIONS_WEBHOOK_URL — Slack #operations incoming webhook (required)
 """
 
@@ -25,7 +24,7 @@ import logging
 import os
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timezone
 from typing import Optional
 
 import requests
@@ -62,6 +61,23 @@ ROOMS: dict[int, str] = {
     16: "QUE", 17: "FAM", 18: "FAM",
 }
 
+# Status priority for sort order (lower = higher priority)
+_STATUS_PRIORITY = {
+    "TURNOVER": 1,
+    "CHECKOUT": 2,
+    "DIRTY":    3,
+    "CHECKIN":  4,
+    "VACANT":   5,
+}
+
+_STATUS_EMOJI = {
+    "TURNOVER": "🔴",
+    "CHECKOUT": "🟠",
+    "DIRTY":    "🟡",
+    "CHECKIN":  "🟢",
+    "VACANT":   "⚪",
+}
+
 # ---------------------------------------------------------------------------
 # Special keywords to scan for in reservation notes
 # ---------------------------------------------------------------------------
@@ -96,7 +112,7 @@ def _extract_keywords(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 class HousekeepingReport:
-    """Fetches today's reservation activity and posts a housekeeping table to Slack."""
+    """Fetches housekeeping status and today's arrivals, posts room table to Slack."""
 
     def __init__(self) -> None:
         api_key     = os.environ.get("CLOUDBEDS_API_KEY", "").strip()
@@ -112,9 +128,6 @@ class HousekeepingReport:
             logger.warning("SLACK_OPERATIONS_WEBHOOK_URL not set — report will print to stdout only")
         self.today = date.today()
 
-        # Populated in _load_room_map()
-        self._room_id_map: dict[str, int] = {}  # Cloudbeds roomID → physical room number
-
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
@@ -122,63 +135,106 @@ class HousekeepingReport:
     def run(self) -> None:
         logger.info("=== HSMI Housekeeping Report — %s ===", self.today)
 
-        self._load_room_map()
+        today_str = self.today.strftime("%Y-%m-%d")
 
-        today_str     = self.today.strftime("%Y-%m-%d")
-        tomorrow_str  = (self.today + timedelta(days=1)).strftime("%Y-%m-%d")
-        cutoff_str    = (self.today + timedelta(days=90)).strftime("%Y-%m-%d")
+        # Step 1: Get live room status from housekeeping endpoint
+        logger.info("Fetching housekeeping status")
+        hs_rooms = self._fetch_housekeeping_status()
+        logger.info("Housekeeping status: %d rooms returned", len(hs_rooms))
 
-        # Fetch reservation summaries for each category
-        logger.info("Fetching checkouts today")
-        checkout_ids = self._fetch_res_ids(checkOutFrom=today_str, checkOutTo=today_str)
+        # Step 2: Get today's check-in reservations with full detail
+        logger.info("Fetching check-in reservations today")
+        checkin_ids = self._fetch_res_ids(checkInFrom=today_str, checkInTo=today_str)
+        logger.info("Check-ins today: %d reservations", len(checkin_ids))
 
-        logger.info("Fetching checkins today")
-        checkin_ids  = self._fetch_res_ids(checkInFrom=today_str, checkInTo=today_str)
+        checkin_details: list[dict] = []
+        for res_id in checkin_ids:
+            d = self._fetch_detail(res_id)
+            if d:
+                checkin_details.append(d)
 
-        logger.info("Fetching stayovers (in house, checking out tomorrow or later)")
-        # Pull all upcoming checkouts, then filter in Python for those who
-        # checked in before today (excluding today's new arrivals).
-        staying_raw  = self._fetch_res_ids(
-            checkOutFrom=tomorrow_str, checkOutTo=cutoff_str
-        )
-        stayover_ids = staying_raw - checkin_ids  # exclude today's arrivals
+        # Build roomID → checkin detail map for Arriving Guest / Notes columns
+        room_id_to_checkin: dict[str, dict] = {}
+        for detail in checkin_details:
+            for assignment in (detail.get("rooms") or detail.get("assigned") or []):
+                if isinstance(assignment, dict):
+                    rid = str(
+                        assignment.get("roomID") or
+                        assignment.get("physicalRoomID") or ""
+                    )
+                    if rid:
+                        room_id_to_checkin[rid] = detail
+        logger.info("Checkin room assignments resolved: %d rooms", len(room_id_to_checkin))
+
+        # Step 3: Derive status for each room and build row data
+        rows: list[dict] = []
+        for room in hs_rooms:
+            room_id   = str(room.get("roomID") or room.get("id") or "")
+            room_name = str(room.get("roomName") or room.get("name") or "")
+            fd_status = (room.get("frontdeskStatus") or "").lower().strip()
+            condition = (room.get("roomCondition") or "").lower().strip()
+            date_str  = str(room.get("date") or "")
+
+            # Extract room number from name
+            m = re.search(r"\b(\d+)\b", room_name)
+            room_num  = int(m.group(1)) if m else 0
+            room_type = ROOMS.get(room_num, "?")
+
+            # Look up arriving guest for this room
+            checkin_detail = room_id_to_checkin.get(room_id)
+
+            # Determine status
+            if fd_status == "check-out" and checkin_detail:
+                status = "TURNOVER"
+            elif fd_status == "check-out":
+                status = "CHECKOUT"
+            elif fd_status == "check-in":
+                status = "CHECKIN"
+            elif condition == "dirty":
+                status = "DIRTY"
+            else:
+                status = "VACANT"
+
+            # Arriving guest info
+            if checkin_detail:
+                surname, party = self._guest_info(checkin_detail)
+                arriving_guest = f"{surname} × {party}"
+                keywords = self._keywords_for(checkin_detail)
+            else:
+                arriving_guest = "-"
+                keywords = []
+
+            # "Dirty since <day>" label for DIRTY rooms
+            dirty_label = ""
+            if status == "DIRTY" and date_str:
+                try:
+                    dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                    dirty_label = dt.strftime("%a")
+                except (ValueError, TypeError):
+                    dirty_label = date_str[:3]
+
+            rows.append({
+                "room_num":      room_num,
+                "room_type":     room_type,
+                "status":        status,
+                "priority":      _STATUS_PRIORITY.get(status, 9),
+                "arriving_guest": arriving_guest,
+                "keywords":      keywords,
+                "dirty_label":   dirty_label,
+            })
+
+        # Sort: priority first, then room number
+        rows.sort(key=lambda r: (r["priority"], r["room_num"]))
 
         logger.info(
-            "Counts — checkouts: %d  checkins: %d  stayovers: %d",
-            len(checkout_ids), len(checkin_ids), len(stayover_ids),
+            "Status summary — %s",
+            ", ".join(
+                f"{s}: {sum(1 for r in rows if r['status'] == s)}"
+                for s in _STATUS_PRIORITY
+            ),
         )
 
-        # Enrich all unique reservations with full detail (room assignment, guest, notes)
-        all_ids = checkout_ids | checkin_ids | stayover_ids
-        details: dict[str, dict] = {}
-        for res_id in all_ids:
-            details[res_id] = self._fetch_detail(res_id)
-
-        # Build per-room data
-        room_data: dict[int, dict] = {
-            n: {"checkout": None, "checkin": None, "stayover": None}
-            for n in ROOMS
-        }
-
-        for res_id in checkout_ids:
-            d = details.get(res_id, {})
-            for rn in self._room_numbers_for(d):
-                if rn in room_data:
-                    room_data[rn]["checkout"] = d
-
-        for res_id in checkin_ids:
-            d = details.get(res_id, {})
-            for rn in self._room_numbers_for(d):
-                if rn in room_data:
-                    room_data[rn]["checkin"] = d
-
-        for res_id in stayover_ids:
-            d = details.get(res_id, {})
-            for rn in self._room_numbers_for(d):
-                if rn in room_data:
-                    room_data[rn]["stayover"] = d
-
-        message = self._build_message(room_data)
+        message = self._build_message(rows)
         logger.info("Posting housekeeping report")
         self._post(message)
         logger.info("=== Housekeeping Report complete ===")
@@ -187,32 +243,23 @@ class HousekeepingReport:
     # API helpers
     # ------------------------------------------------------------------
 
-    def _load_room_map(self) -> None:
-        """
-        Call getRooms to build Cloudbeds roomID → physical room number mapping.
-        Falls back gracefully if the endpoint is unavailable.
-        """
+    def _fetch_housekeeping_status(self) -> list[dict]:
+        """Call getHousekeepingStatus and return the list of room objects."""
         try:
-            resp = self.client._get("getRooms")
+            resp = self.client._get("getHousekeepingStatus")
             data = resp.get("data", resp)
-            items: list[dict] = (
-                list(data.values()) if isinstance(data, dict)
-                else data if isinstance(data, list)
-                else []
-            )
-            for room in items:
-                room_id = str(
-                    room.get("roomID") or room.get("physicalRoomID") or
-                    room.get("id") or ""
-                )
-                room_name = str(room.get("roomName") or room.get("name") or "")
-                if room_id:
-                    m = re.search(r"\b(\d+)\b", room_name)
-                    if m:
-                        self._room_id_map[room_id] = int(m.group(1))
-            logger.info("Room map: %d entries loaded", len(self._room_id_map))
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                # May be keyed by roomID or wrapped in a sub-key
+                for key in ("rooms", "housekeeping", "result"):
+                    if key in data and isinstance(data[key], list):
+                        return data[key]
+                return list(data.values())
+            return []
         except Exception as exc:
-            logger.warning("getRooms failed: %s — room numbers may be missing from report", exc)
+            logger.error("getHousekeepingStatus failed: %s", exc)
+            return []
 
     def _fetch_res_ids(self, **params) -> set[str]:
         """
@@ -268,32 +315,6 @@ class HousekeepingReport:
     # Data extraction helpers
     # ------------------------------------------------------------------
 
-    def _room_numbers_for(self, detail: dict) -> list[int]:
-        """
-        Extract physical room numbers from the 'assigned' array in a reservation
-        detail. Tries the room ID map first, falls back to parsing room name.
-        """
-        nums: list[int] = []
-        for assignment in (detail.get("rooms") or detail.get("assigned") or []):
-            room_id = str(
-                assignment.get("roomID") or
-                assignment.get("physicalRoomID") or ""
-            )
-            if room_id and room_id in self._room_id_map:
-                nums.append(self._room_id_map[room_id])
-                continue
-            # Fallback: parse room number from name/number field
-            room_name = str(
-                assignment.get("roomName") or
-                assignment.get("roomNumber") or ""
-            )
-            m = re.search(r"\b(\d+)\b", room_name)
-            if m:
-                n = int(m.group(1))
-                if n in ROOMS:
-                    nums.append(n)
-        return nums
-
     def _guest_info(self, detail: dict) -> tuple[str, int]:
         """Return (surname, party_size) from a reservation detail dict."""
         full_name = (
@@ -335,71 +356,60 @@ class HousekeepingReport:
     # Message builder
     # ------------------------------------------------------------------
 
-    def _build_message(self, room_data: dict[int, dict]) -> str:
+    def _build_message(self, rows: list[dict]) -> str:
         today_label = self.today.strftime("%a %d %b %Y")
 
-        C_ROOM    = 10   # "18 - FAM" = 8 chars
-        C_CLEAN   = 12   # "TURNOVER" = 8 chars
-        C_CHECKIN = 20   # "Smithington × 10" ≈ 17 chars
+        # Column widths (plain ASCII — emoji prefix sits outside these widths)
+        C_ROOM   = 9    # "18 FAM" = 6 chars
+        C_STATUS = 14   # "DIRTY (Mon)" = 11 chars
+        C_GUEST  = 20   # "Smithington × 10" ≈ 17 chars
 
-        sep    = "─" * (C_ROOM + C_CLEAN + C_CHECKIN + 20)
+        # Header: 3 spaces to align with "🔴 " prefix (emoji=2 + space=1)
+        sep    = "─" * (3 + C_ROOM + C_STATUS + C_GUEST + 16)
         header = (
+            f"   "
             f"{'Room':<{C_ROOM}}"
-            f"{'Clean?':<{C_CLEAN}}"
-            f"{'Arriving Guest':<{C_CHECKIN}}"
+            f"{'Status':<{C_STATUS}}"
+            f"{'Arriving Guest':<{C_GUEST}}"
             f"Notes"
         )
 
-        n_turnovers = n_stayovers = n_checkins = 0
+        n_turnovers = n_checkouts = n_dirty = n_checkins = n_vacant = 0
         special_notes: list[str] = []
-        rows: list[str] = []
+        table_rows: list[str] = []
 
-        for room_num in sorted(ROOMS):
-            room_type = ROOMS[room_num]
-            rd  = room_data[room_num]
-            co  = rd["checkout"]
-            ci  = rd["checkin"]
-            so  = rd["stayover"]
+        for r in rows:
+            status    = r["status"]
+            emoji     = _STATUS_EMOJI[status]
+            room_num  = r["room_num"]
+            room_type = r["room_type"]
 
-            # --- Determine clean status ---
-            if co:
-                clean = "TURNOVER"  # any checkout = full turnover for Dwayne
-                n_turnovers += 1
-            elif so:
-                clean = "STAYOVER"
-                n_stayovers += 1
+            if status == "TURNOVER": n_turnovers += 1
+            elif status == "CHECKOUT": n_checkouts += 1
+            elif status == "DIRTY": n_dirty += 1
+            elif status == "CHECKIN": n_checkins += 1
+            else: n_vacant += 1
+
+            # Status display — DIRTY shows how long it's been dirty
+            if status == "DIRTY" and r["dirty_label"]:
+                status_col = f"DIRTY ({r['dirty_label']})"
             else:
-                clean = "-"         # vacant or fresh arrival only
+                status_col = status
 
-            # Count checkins regardless of whether there's also a checkout
-            if ci:
-                n_checkins += 1
+            notes_col  = ", ".join(r["keywords"]) if r["keywords"] else "-"
+            room_label = f"{room_num} {room_type}"
 
-            # --- Check-in column ---
-            if ci:
-                surname, party = self._guest_info(ci)
-                checkin_col = f"{surname} × {party}"
-            else:
-                checkin_col = "-"
+            if r["keywords"]:
+                special_notes.append(
+                    f"  {emoji} Room {room_num} ({room_type}): {notes_col}"
+                )
 
-            # --- Notes: keywords from all active reservation(s) for this room ---
-            keywords: list[str] = []
-            for res in (co, ci, so):
-                if res:
-                    keywords.extend(self._keywords_for(res))
-            # Deduplicate while preserving order
-            seen_kw: set[str] = set()
-            unique_kw = [k for k in keywords if not (k in seen_kw or seen_kw.add(k))]  # type: ignore[func-returns-value]
-            notes_col = ", ".join(unique_kw) if unique_kw else "-"
-
-            if unique_kw:
-                special_notes.append(f"  Room {room_num} ({room_type}): {', '.join(unique_kw)}")
-
-            room_label = f"{room_num} - {room_type}"
-            rows.append(
+            # Emoji sits before the fixed-width columns so padding is unaffected
+            table_rows.append(
+                f"{emoji} "
                 f"{room_label:<{C_ROOM}}"
-                f"{clean:<{C_CLEAN}}"
-                f"{checkin_col:<{C_CHECKIN}}"
+                f"{status_col:<{C_STATUS}}"
+                f"{r['arriving_guest']:<{C_GUEST}}"
                 f"{notes_col}"
             )
 
@@ -410,13 +420,15 @@ class HousekeepingReport:
             header,
             sep,
         ]
-        lines.extend(rows)
+        lines.extend(table_rows)
         lines.append("```")
         lines.append("")
         lines.append(
             f"_{n_turnovers} turnover{'s' if n_turnovers != 1 else ''}"
-            f" | {n_stayovers} stayover{'s' if n_stayovers != 1 else ''}"
-            f" | {n_checkins} checkin{'s' if n_checkins != 1 else ''}_"
+            f" | {n_checkouts} checkout{'s' if n_checkouts != 1 else ''}"
+            f" | {n_dirty} dirty"
+            f" | {n_checkins} checkin{'s' if n_checkins != 1 else ''}"
+            f" | {n_vacant} vacant_"
         )
 
         if special_notes:
@@ -435,7 +447,11 @@ class HousekeepingReport:
             print(message)
             return
         try:
-            resp = requests.post(self.webhook, json={"text": message, "username": "Ops Agent", "icon_emoji": ":clipboard:"}, timeout=15)
+            resp = requests.post(
+                self.webhook,
+                json={"text": message, "username": "Ops Agent", "icon_emoji": ":clipboard:"},
+                timeout=15,
+            )
             resp.raise_for_status()
             logger.info("Housekeeping report posted to Slack #operations")
         except requests.RequestException as exc:
