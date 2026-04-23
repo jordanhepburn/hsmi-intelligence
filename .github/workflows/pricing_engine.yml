@@ -1,10 +1,10 @@
 name: HSMI Pricing Engine
 
 on:
+  schedule:
+    - cron: '0 20 * * *'  # 6am AEST daily — 60-day base run
   workflow_dispatch:
-    # Triggered hourly by cron-job.org via /cron/pricing-engine on Railway.
-    # GitHub schedule removed — it was unreliable and caused duplicate runs
-    # when both cron entries matched at hour 20 UTC.
+    # Triggered hourly by cron-job.org via /cron/pricing-engine on Railway
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
