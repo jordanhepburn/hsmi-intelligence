@@ -2,8 +2,8 @@ name: HSMI Competitor Signal + Rate Push
 
 on:
   schedule:
-    # 12:00 pm AEST = 02:00 UTC
-    - cron: '0 2 * * *'
+    # 9:00 am AEST = 23:00 UTC (previous day)
+    - cron: '0 23 * * *'
   workflow_dispatch:
     # Allows manual trigger from the GitHub Actions UI
 
@@ -38,7 +38,7 @@ jobs:
         run: python pricing_engine/competitor_signal.py
 
       # Brief pause so this run never overlaps with an hourly pricing_engine.yml
-      # run that may have fired on the same minute (cron '0 2 * * *').
+      # run that may have fired on the same minute (cron '0 23 * * *').
       - name: Wait for any concurrent hourly run to complete
         run: sleep 120
 

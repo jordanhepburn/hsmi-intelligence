@@ -2,8 +2,8 @@
 HSMI Competitor Signal
 ======================
 Queries SerpApi for regional accommodation availability and competitor pricing
-around Hepburn Springs / Daylesford. Runs once per day at 12pm AEST via
-GitHub Actions cron '0 2 * * *'.
+around Hepburn Springs / Daylesford. Runs once per day at 9am AEST via
+GitHub Actions cron '0 23 * * *'.
 
 Makes exactly 4 SerpApi calls per run (2 queries × 2 dates: the coming
 Friday and Saturday), writing the results to competitor_cache.json. The
@@ -429,7 +429,7 @@ def post_slack_summary(cache: dict, webhook_url: str) -> None:
     today = date.today()
     lines = [
         f"*HSMI Competitor Signal — {today.strftime('%a %d %b %Y')}*",
-        f"_12pm market snapshot — rate push triggered_",
+        f"_9am market snapshot — rate push triggered_",
         "",
     ]
 
