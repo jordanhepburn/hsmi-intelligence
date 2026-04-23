@@ -200,6 +200,7 @@ class CloudbedsClient:
             "roomTypeID": room_type_id,
             "startDate": start_date.strftime("%Y-%m-%d"),
             "endDate": end_date.strftime("%Y-%m-%d"),
+            "detailedRates": "true",
         }
         response = self._get("getRate", params=params)
 
@@ -208,24 +209,14 @@ class CloudbedsClient:
 
         rates: dict[str, float] = {}
         data = response.get("data", response)
+
+        # detailedRates=true returns data.roomRateDetailed — an array of
+        # {"date": "YYYY-MM-DD", "roomRate": 150.0} per-night entries.
         if isinstance(data, dict):
-            for date_str, rate_info in data.items():
-                if isinstance(rate_info, dict):
-                    val = rate_info.get("roomRate") or rate_info.get("rate")
-                    if val is not None:
-                        try:
-                            rates[date_str] = float(val)
-                        except (TypeError, ValueError):
-                            pass
-                else:
-                    try:
-                        rates[date_str] = float(rate_info)
-                    except (TypeError, ValueError):
-                        pass
-        elif isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict):
-                    d = item.get("date") or item.get("startDate")
+            detailed = data.get("roomRateDetailed")
+            if isinstance(detailed, list):
+                for item in detailed:
+                    d = item.get("date")
                     r = item.get("roomRate") or item.get("rate")
                     if d and r is not None:
                         try:
@@ -233,7 +224,7 @@ class CloudbedsClient:
                         except (TypeError, ValueError):
                             pass
 
-        logger.debug("getRate returned %d rate entries for room_type=%s", len(rates), room_type_id)
+        logger.info("getRate returned %d rate entries for room_type=%s", len(rates), room_type_id)
         return rates
 
     def get_room_types(self) -> list[dict]:
