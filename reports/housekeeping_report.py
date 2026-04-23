@@ -274,7 +274,7 @@ class HousekeepingReport:
         detail. Tries the room ID map first, falls back to parsing room name.
         """
         nums: list[int] = []
-        for assignment in detail.get("assigned", []):
+        for assignment in (detail.get("rooms") or detail.get("assigned") or []):
             room_id = str(
                 assignment.get("roomID") or
                 assignment.get("physicalRoomID") or ""
@@ -314,14 +314,22 @@ class HousekeepingReport:
 
     def _keywords_for(self, detail: dict) -> list[str]:
         """Scan all note-like fields in a reservation for special keywords."""
-        text = " ".join(
+        parts: list[str] = [
             str(detail.get(f) or "")
             for f in (
-                "guestNotes", "internalNotes", "notes",
-                "specialRequests", "housekeepingNotes", "comments",
+                "guestNotes", "guestNote", "internalNotes", "notes", "note",
+                "specialRequests", "specialRequest", "housekeepingNotes",
+                "comments", "comment", "message", "remarks",
             )
-        )
-        return _extract_keywords(text)
+        ]
+        # Also scan notes nested inside room assignment objects
+        for room in (detail.get("rooms") or detail.get("assigned") or []):
+            if isinstance(room, dict):
+                parts.extend(
+                    str(room.get(f) or "")
+                    for f in ("notes", "note", "housekeepingNotes", "specialRequests", "comments")
+                )
+        return _extract_keywords(" ".join(parts))
 
     # ------------------------------------------------------------------
     # Message builder
@@ -338,11 +346,11 @@ class HousekeepingReport:
         header = (
             f"{'Room':<{C_ROOM}}"
             f"{'Clean?':<{C_CLEAN}}"
-            f"{'Check-in?':<{C_CHECKIN}}"
+            f"{'Arriving Guest':<{C_CHECKIN}}"
             f"Notes"
         )
 
-        n_checkouts = n_turnovers = n_stayovers = n_checkins = 0
+        n_turnovers = n_stayovers = n_checkins = 0
         special_notes: list[str] = []
         rows: list[str] = []
 
@@ -354,20 +362,18 @@ class HousekeepingReport:
             so  = rd["stayover"]
 
             # --- Determine clean status ---
-            if co and ci:
-                clean = "TURNOVER"
+            if co:
+                clean = "TURNOVER"  # any checkout = full turnover for Dwayne
                 n_turnovers += 1
-            elif co:
-                clean = "CHECKOUT"
-                n_checkouts += 1
             elif so:
                 clean = "STAYOVER"
                 n_stayovers += 1
-            elif ci:
-                clean = "-"         # arriving into vacant room — prepare but no full clean
-                n_checkins += 1
             else:
-                clean = "-"         # vacant
+                clean = "-"         # vacant or fresh arrival only
+
+            # Count checkins regardless of whether there's also a checkout
+            if ci:
+                n_checkins += 1
 
             # --- Check-in column ---
             if ci:
@@ -408,8 +414,7 @@ class HousekeepingReport:
         lines.append("```")
         lines.append("")
         lines.append(
-            f"_{n_checkouts} checkout{'s' if n_checkouts != 1 else ''}"
-            f" | {n_turnovers} turnover{'s' if n_turnovers != 1 else ''}"
+            f"_{n_turnovers} turnover{'s' if n_turnovers != 1 else ''}"
             f" | {n_stayovers} stayover{'s' if n_stayovers != 1 else ''}"
             f" | {n_checkins} checkin{'s' if n_checkins != 1 else ''}_"
         )
