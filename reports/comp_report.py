@@ -441,7 +441,7 @@ def run() -> None:
     message = _build_message(friday, nights)
 
     try:
-        resp = requests.post(webhook, json={"text": message}, timeout=15)
+        resp = requests.post(webhook, json={"text": message, "username": "Ops Agent", "icon_emoji": ":bar_chart:"}, timeout=15)
         resp.raise_for_status()
         logger.info("Weekly comp report posted to Slack")
     except requests.RequestException as exc:

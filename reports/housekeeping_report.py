@@ -430,7 +430,7 @@ class HousekeepingReport:
             print(message)
             return
         try:
-            resp = requests.post(self.webhook, json={"text": message}, timeout=15)
+            resp = requests.post(self.webhook, json={"text": message, "username": "Ops Agent", "icon_emoji": ":clipboard:"}, timeout=15)
             resp.raise_for_status()
             logger.info("Housekeeping report posted to Slack #operations")
         except requests.RequestException as exc:

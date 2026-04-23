@@ -329,7 +329,7 @@ class MonthlyReport:
         try:
             response = requests.post(
                 self.slack_webhook,
-                json={"text": message},
+                json={"text": message, "username": "Ops Agent", "icon_emoji": ":bar_chart:"},
                 timeout=15,
             )
             response.raise_for_status()

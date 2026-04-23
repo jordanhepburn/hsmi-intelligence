@@ -762,7 +762,7 @@ class PricingEngine:
             label = f"{n} updates"
 
         try:
-            response = requests.post(self.slack_webhook, json={"text": text}, timeout=10)
+            response = requests.post(self.slack_webhook, json={"text": text, "username": "Ops Agent", "icon_emoji": ":chart_with_upwards_trend:"}, timeout=10)
             response.raise_for_status()
             logger.info("Slack notification sent (%s)", label)
         except requests.RequestException as exc:

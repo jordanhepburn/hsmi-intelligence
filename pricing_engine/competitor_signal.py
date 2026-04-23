@@ -483,7 +483,7 @@ def post_slack_summary(cache: dict, webhook_url: str) -> None:
     lines.append("_Pricing engine running now — rate changes will follow if needed_")
 
     try:
-        resp = requests.post(webhook_url, json={"text": "\n".join(lines)}, timeout=10)
+        resp = requests.post(webhook_url, json={"text": "\n".join(lines), "username": "Ops Agent", "icon_emoji": ":chart_with_upwards_trend:"}, timeout=10)
         resp.raise_for_status()
         logger.info("Slack summary posted")
     except requests.RequestException as exc:
