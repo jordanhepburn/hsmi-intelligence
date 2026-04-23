@@ -19,6 +19,7 @@ Usage:
 
 import json
 import logging
+import math
 import os
 import sys
 import traceback
@@ -552,12 +553,12 @@ class PricingEngine:
                     if occ_pct > 0.85:
                         live = self._current_rates.get(d_str, {}).get(code)
                         if live is not None:
-                            rate = max(floor_, min(ceiling_, round(live)))
+                            rate = math.ceil(max(floor_, min(ceiling_, round(live))) / 5) * 5
                             reason = f"EVENING: occ >85% — hold live rate ${live:.0f}"
                         else:
                             # No live rate available — hold base as safe fallback
                             base = cfg["peak"] if is_peak_date(current) else (cfg["weekend"] if is_weekend else cfg["midweek"])
-                            rate = max(floor_, min(ceiling_, round(base)))
+                            rate = math.ceil(max(floor_, min(ceiling_, round(base))) / 5) * 5
                             reason = "EVENING: occ >85% — hold base (live rate unavailable)"
                         self._rate_reasons.setdefault(d_str, {})[code] = "EVENING hold"
                     else:
@@ -592,12 +593,13 @@ class PricingEngine:
 
                 raw_rate   = base_rate * multiplier
                 rounded    = round(raw_rate)
-                final_rate = max(floor_, min(ceiling_, rounded))
+                clamped    = max(floor_, min(ceiling_, rounded))
+                final_rate = math.ceil(clamped / 5) * 5
 
                 # Build log suffix describing any clamp
-                if final_rate < rounded:
+                if clamped < rounded:
                     clamp_note = f"→ capped at ${final_rate:.0f} ceiling"
-                elif final_rate > rounded:
+                elif clamped > rounded:
                     clamp_note = f"→ floored at ${final_rate:.0f} floor"
                 else:
                     clamp_note = f"→ ${final_rate:.0f}"
@@ -616,10 +618,11 @@ class PricingEngine:
                 if comp_mult != 1.00:
                     comp_raw = final_rate * comp_mult
                     comp_rounded = round(comp_raw)
-                    comp_final = max(floor_, min(ceiling_, comp_rounded))
-                    if comp_final < comp_rounded:
+                    comp_clamped = max(floor_, min(ceiling_, comp_rounded))
+                    comp_final = math.ceil(comp_clamped / 5) * 5
+                    if comp_clamped < comp_rounded:
                         comp_note = f"→ capped at ${comp_final:.0f} ceiling"
-                    elif comp_final > comp_rounded:
+                    elif comp_clamped > comp_rounded:
                         comp_note = f"→ floored at ${comp_final:.0f} floor"
                     else:
                         comp_note = f"→ ${comp_final:.0f}"
