@@ -485,11 +485,6 @@ class HousekeepingReport:
         lines.extend(table_rows)
         lines.append("```")
 
-        if special_notes:
-            lines.append("")
-            lines.append("*Special notes:*")
-            lines.extend(special_notes)
-
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
