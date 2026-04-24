@@ -439,8 +439,19 @@ class HousekeepingReport:
                 f"{notes_col}"
             )
 
+        summary = (
+            f"_{n_turnovers} turnover{'s' if n_turnovers != 1 else ''}"
+            f" | {n_checkouts} checkout{'s' if n_checkouts != 1 else ''}"
+            f" | {n_dirty} dirty"
+            f" | {n_checkins} checkin{'s' if n_checkins != 1 else ''}"
+            f" | {n_vacant} vacant_"
+        )
+
         lines: list[str] = [
             f"*HSMI Housekeeping — {today_label}*",
+            "",
+            summary,
+            "_Always cross-check with <https://us2.cloudbeds.com/connect/8293433316474880#/calendar|Cloudbeds calendar>_",
             "",
             "```",
             header,
@@ -448,14 +459,6 @@ class HousekeepingReport:
         ]
         lines.extend(table_rows)
         lines.append("```")
-        lines.append("")
-        lines.append(
-            f"_{n_turnovers} turnover{'s' if n_turnovers != 1 else ''}"
-            f" | {n_checkouts} checkout{'s' if n_checkouts != 1 else ''}"
-            f" | {n_dirty} dirty"
-            f" | {n_checkins} checkin{'s' if n_checkins != 1 else ''}"
-            f" | {n_vacant} vacant_"
-        )
 
         if special_notes:
             lines.append("")
