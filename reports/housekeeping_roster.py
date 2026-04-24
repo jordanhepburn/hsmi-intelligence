@@ -5,12 +5,14 @@ Posts a 14-day rolling housekeeping capacity forecast to Slack #operations
 at 8am AEST (10pm UTC, cron '0 22 * * *').
 
 For each day in the next 14 days it shows:
-  - TO  = turnovers (same roomID checking out AND in — must clean 10am–2pm)
-  - CO  = checkouts only (no new arrival — flexible timing)
-  - Flag = capacity alert based on day-of-week staffing rules
+  - turnovers  = same room checking out AND in (must clean 10am–2pm)
+  - checkouts  = departure only, no arrival (flexible timing)
+  - Flag       = capacity alert based on rostered hours
 
-Staffing capacity (turnovers):
-  Mon  6 | Tue  3 | Wed  0 (D+L off) | Thu  3 | Fri  6 | Sat  6 | Sun  6
+Staffing (rostered hours = 1hr per room):
+  Lisa:   Mon 6 | Tue 2 | Wed 0 | Thu 0 | Fri 5 | Sat 6 | Sun 6
+  Dwayne: Mon 6 | Tue 2 | Wed 0 | Thu 0 | Fri 5 | Sat 6 | Sun 6
+  Total:  Mon 12 | Tue 4 | Wed/Thu 0 (D+L off) | Fri 10 | Sat/Sun 12
 
 Environment variables:
   CLOUDBEDS_API_KEY            — Cloudbeds API key (required)
@@ -55,9 +57,16 @@ logger = logging.getLogger(__name__)
 TOTAL_ROOMS = 18
 LOOKAHEAD   = 14
 
-# Max turnovers Dwayne + Leanne can handle per day (0=Mon … 6=Sun)
-TURNOVER_CAPACITY = {0: 6, 1: 3, 2: 0, 3: 3, 4: 6, 5: 6, 6: 6}
-SUNDAY_MIN_CLEAN  = 8
+# Rostered hours per day (0=Mon … 6=Sun).  1 hr = 1 room cleaned.
+LISA_HOURS   = {0: 6, 1: 2, 2: 0, 3: 0, 4: 5, 5: 6, 6: 6}
+DWAYNE_HOURS = {0: 6, 1: 2, 2: 0, 3: 0, 4: 5, 5: 6, 6: 6}
+TOTAL_CLEAN_CAPACITY = {dow: LISA_HOURS[dow] + DWAYNE_HOURS[dow] for dow in range(7)}
+# = {0:12, 1:4, 2:0, 3:0, 4:10, 5:12, 6:12}
+
+# Turnovers must happen in the 10am–2pm window — tighter than general cleaning.
+# Tue/Thu only Lisa's hours count (Dwayne not available for that window).
+# Sat/Sun both staff available for full reset.
+TURNOVER_CAPACITY = {0: 6, 1: 2, 2: 0, 3: 0, 4: 5, 5: 12, 6: 12}
 
 _CANCELLED = {"cancelled", "canceled", "no_show", "no-show", "noshow"}
 
@@ -159,47 +168,59 @@ class HousekeepingRoster:
             # Capacity / flag logic
             # ------------------------------------------------------------------
 
-            if dow == 5:  # Saturday — full reset day
-                total = n_to + n_co
-                if total > 6:
-                    flag = f"🚨 ARRANGE CASUALS — {total} rooms (full reset)"
-                elif total == 6:
-                    flag = "✅ at capacity — block late checkouts"
-                elif total > 0:
-                    flag = "✅"
-                else:
-                    flag = "✅ quiet"
+            total_cap       = TOTAL_CLEAN_CAPACITY[dow]
+            turn_cap        = TURNOVER_CAPACITY[dow]
+            total_available = n_to + n_co
+            must_clean      = min(total_available, max(n_to, total_cap))
+            deferred        = max(0, total_available - must_clean)
 
-            elif dow == 6:  # Sunday — always clean at least SUNDAY_MIN_CLEAN, defer rest to Monday
-                extras   = max(0, 2 - max(0, vacant - n_to))
-                must     = max(n_to + extras, SUNDAY_MIN_CLEAN)
-                deferred = max(0, (n_to + n_co) - must)
-                sunday_deferrals = deferred
-                if must > 6:
-                    flag = f"⚠️  consider casuals — {must} needed | defer {deferred} to Mon"
-                elif deferred > 0:
-                    flag = f"✅ clean {must} | defer {deferred} to Mon"
-                else:
-                    flag = "✅ quiet"
-
-            elif dow == 0:  # Monday — absorb Sunday deferrals
-                eff  = n_to + sunday_deferrals
-                note = f" +{sunday_deferrals} deferred from Sun" if sunday_deferrals else ""
-                sunday_deferrals = 0
-                flag = f"🚨 arrange casuals — {eff} turnovers{note}" if eff > 6 else f"✅{note}"
-                n_to = eff
-
-            elif dow == 2:  # Wednesday — D+L off
+            if dow in (2, 3):  # Wednesday and Thursday — D+L both off
                 if n_to > 0:
                     flag = f"🚨 D+L off — arrange casuals ({n_to} turnovers)"
                 elif n_co > 0:
-                    flag = f"✅ D+L off — {n_co} checkouts only"
+                    flag = f"✅ D+L off — {n_co} checkouts (arrange casuals if needed)"
                 else:
                     flag = "✅ D+L off — quiet"
 
-            else:  # Tue, Thu, Fri
-                cap  = TURNOVER_CAPACITY[dow]
-                flag = f"🚨 arrange casuals — {n_to} turnovers (cap {cap})" if n_to > cap else "✅"
+            elif dow == 5:  # Saturday — full reset, both staff
+                if n_to > 12:
+                    flag = f"🚨 ARRANGE CASUALS — {n_to} turnovers (cap 12)"
+                elif deferred > 0:
+                    flag = f"🚨 ARRANGE CASUALS — {deferred} rooms over capacity"
+                elif n_to > 6:
+                    flag = f"⚠️  heavy day — Dwayne + Lisa both needed ({n_to} turnovers)"
+                else:
+                    flag = f"✅ full reset — {must_clean} rooms"
+
+            elif dow == 6:  # Sunday — clean to capacity, defer rest to Monday
+                sunday_deferrals = deferred
+                if n_to > 12:
+                    flag = f"⚠️  consider casuals — {n_to} turnovers"
+                elif deferred > 0:
+                    flag = f"✅ clean {must_clean} | defer {deferred} to Mon"
+                else:
+                    flag = f"✅ clean {must_clean}"
+
+            elif dow == 0:  # Monday — absorb Sunday deferrals
+                total_monday = n_to + sunday_deferrals + n_co
+                must_clean   = min(total_monday, total_cap)
+                deferred     = max(0, total_monday - must_clean)
+                note = f" +{sunday_deferrals} deferred from Sun" if sunday_deferrals else ""
+                sunday_deferrals = 0
+                if n_to > turn_cap:
+                    flag = f"🚨 arrange casuals — {n_to} turnovers{note}"
+                elif deferred > 0:
+                    flag = f"✅ clean {must_clean}{note} | {deferred} carry to Tue"
+                else:
+                    flag = f"✅ clean {must_clean}{note}"
+
+            else:  # Tuesday and Friday
+                if n_to > turn_cap:
+                    flag = f"🚨 arrange casuals — {n_to} turnovers (cap {turn_cap})"
+                elif deferred > 0:
+                    flag = f"✅ clean {must_clean} | defer {deferred}"
+                else:
+                    flag = f"✅ clean {must_clean}" if must_clean > 0 else "✅ quiet"
 
             rows.append({"date": d, "n_to": n_to, "n_co": n_co, "flag": flag})
 
@@ -278,8 +299,8 @@ class HousekeepingRoster:
 
         lines += [
             "",
-            "_turnovers = same room checking out + in (must clean 10am–2pm) | checkouts = departure only (flexible)_",
-            "_Capacity: Mon/Fri/Sat/Sun 6 | Tue/Thu 3 | Wed 0 (D+L off)_",
+            "_Capacity: Mon 12 | Tue 4 | Wed/Thu 0 (D+L off) | Fri 10 | Sat/Sun 12_",
+            "_Turnovers must be cleaned 10am–2pm | Checkouts are flexible_",
         ]
 
         return "\n".join(lines)
