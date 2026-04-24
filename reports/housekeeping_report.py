@@ -24,7 +24,8 @@ import logging
 import os
 import re
 import sys
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 import requests
@@ -126,10 +127,10 @@ class HousekeepingReport:
         self.webhook = os.environ.get("SLACK_OPERATIONS_WEBHOOK_URL", "").strip()
         if not self.webhook:
             logger.warning("SLACK_OPERATIONS_WEBHOOK_URL not set — report will print to stdout only")
-        # Use AEST (UTC+10) — report runs at 7am AEST = 9pm UTC the previous day,
-        # so date.today() (UTC) would return yesterday's date.
-        _AEST = timezone(timedelta(hours=10))
-        self.today = datetime.now(_AEST).date()
+        # Use Melbourne timezone (handles AEST/AEDT DST automatically) —
+        # report runs at 7am local = 9pm UTC the previous day, so date.today()
+        # (UTC) would return yesterday's date.
+        self.today = datetime.now(ZoneInfo("Australia/Melbourne")).date()
 
     # ------------------------------------------------------------------
     # Entry point
