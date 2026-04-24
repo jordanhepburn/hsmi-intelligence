@@ -202,10 +202,8 @@ class HousekeepingRoster:
                     maint_note = f" | Dwayne: {dwayne_maintenance}h maintenance" if dwayne_maintenance > 0 else ""
                     flag = f"✅ clean {rooms_cleaned}{maint_note}"
 
-            elif dow == 6:  # Sunday — D+L, clean turnovers + 2 extras, defer rest to Monday
-                vacant_tonight     = TOTAL_ROOMS - len(checkins_today - checkouts_today)
-                extras             = max(0, 2 - max(0, vacant_tonight - n_to))
-                must_clean         = n_to + extras
+            elif dow == 6:  # Sunday — D+L, always clean turnovers + 2 minimum, defer rest to Monday
+                must_clean         = max(n_to + 2, n_to)  # always at least turnovers + 2
                 sunday_deferrals   = max(0, total_available - must_clean)
                 dwayne_maintenance = max(0, dwayne_hrs - max(0, must_clean - lisa_hrs))
                 if n_to > max_to:
