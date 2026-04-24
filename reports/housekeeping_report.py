@@ -89,6 +89,7 @@ _KEYWORDS = [
     "late checkout", "late check-out",
     "early checkin", "early check-in",
     "accessible", "wheelchair",
+    "ground floor",
 ]
 
 _CANCELLED = {"cancelled", "canceled", "no_show", "no-show", "noshow"}
@@ -155,6 +156,7 @@ class HousekeepingReport:
         for res_id in checkin_ids:
             d = self._fetch_detail(res_id)
             if d:
+                d["_raw_notes"] = self._fetch_notes(res_id)
                 checkin_details.append(d)
 
         # Build roomID → checkin detail map for Arriving Guest / Notes columns.
@@ -226,9 +228,12 @@ class HousekeepingReport:
             if checkin_detail:
                 surname, party = self._guest_info(checkin_detail)
                 arriving_guest = f"{surname} × {party}"
-                keywords = self._keywords_for(checkin_detail)
+                notes_text = checkin_detail.get("_raw_notes", "")
+                # Keyword extraction for the Special Notes section
+                keywords = _extract_keywords(notes_text) or self._keywords_for(checkin_detail)
             else:
                 arriving_guest = "-"
+                notes_text = ""
                 keywords = []
 
             # "Dirty since <day>" label for DIRTY rooms
@@ -246,6 +251,7 @@ class HousekeepingReport:
                 "status":        status,
                 "priority":      _STATUS_PRIORITY.get(status, 9),
                 "arriving_guest": arriving_guest,
+                "notes_text":    notes_text,
                 "keywords":      keywords,
                 "dirty_label":   dirty_label,
             })
@@ -337,6 +343,25 @@ class HousekeepingReport:
             logger.warning("getReservation %s failed: %s", res_id, exc)
             return {}
 
+    def _fetch_notes(self, res_id: str) -> str:
+        """
+        Fetch reservation notes from getReservationNotes.
+        Returns all notes concatenated with ' | ', or empty string if none.
+        """
+        try:
+            resp = self.client._get("getReservationNotes", params={"reservationID": res_id})
+            data = resp.get("data", [])
+            notes: list[str] = []
+            if isinstance(data, list):
+                for item in data:
+                    note = str(item.get("reservationNote") or "").strip()
+                    if note:
+                        notes.append(note)
+            return " | ".join(notes)
+        except CloudbedsAPIError as exc:
+            logger.warning("getReservationNotes %s failed: %s", res_id, exc)
+            return ""
+
     # ------------------------------------------------------------------
     # Data extraction helpers
     # ------------------------------------------------------------------
@@ -422,12 +447,12 @@ class HousekeepingReport:
             else:
                 status_col = status
 
-            notes_col  = ", ".join(r["keywords"]) if r["keywords"] else "-"
+            notes_col  = r["notes_text"] or "-"
             room_label = f"{room_num} {room_type}"
 
             if r["keywords"]:
                 special_notes.append(
-                    f"  {emoji} Room {room_num} ({room_type}): {notes_col}"
+                    f"  {emoji} Room {room_num} ({room_type}): {', '.join(r['keywords'])}"
                 )
 
             # Emoji sits before the fixed-width columns so padding is unaffected
