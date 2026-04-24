@@ -870,10 +870,11 @@ async def cron_pricing_engine(request: Request):
         logger.warning("cron/pricing-engine: invalid secret")
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    # Use GH_WORKFLOW_TOKEN to avoid collision with Railway's injected GITHUB_TOKEN
+    token = os.environ.get("GH_WORKFLOW_TOKEN", "").strip()
     if not token:
-        logger.error("cron/pricing-engine: GITHUB_TOKEN not set")
-        return JSONResponse({"error": "GITHUB_TOKEN not configured"}, status_code=500)
+        logger.error("cron/pricing-engine: GH_WORKFLOW_TOKEN not set")
+        return JSONResponse({"error": "GH_WORKFLOW_TOKEN not configured"}, status_code=500)
 
     resp = requests.post(
         "https://api.github.com/repos/jordanhepburn/hsmi-intelligence"
