@@ -863,24 +863,31 @@ async def call_started(request: Request):
 
 @app.post("/cron/pricing-engine")
 async def cron_pricing_engine(request: Request):
-    # Verify shared secret
-    secret   = request.headers.get("x-cron-secret", "")
+    return _trigger_workflow(
+        "pricing_engine.yml",
+        "cron/pricing-engine",
+        request.headers.get("x-cron-secret", ""),
+    )
+
+
+def _trigger_workflow(workflow_file: str, label: str, request_secret: str) -> JSONResponse:
+    """Shared helper — validates cron secret and dispatches a GitHub Actions workflow."""
     expected = os.environ.get("CRON_SECRET", "").strip()
-    if expected and not hmac.compare_digest(secret, expected):
-        logger.warning("cron/pricing-engine: invalid secret")
+    if expected and not hmac.compare_digest(request_secret, expected):
+        logger.warning("%s: invalid secret", label)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     token = os.environ.get("GITHUB_TOKEN", "").strip()
     if not token:
-        logger.error("cron/pricing-engine: GITHUB_TOKEN not set")
+        logger.error("%s: GITHUB_TOKEN not set", label)
         return JSONResponse({"error": "GITHUB_TOKEN not configured"}, status_code=500)
 
     resp = requests.post(
-        "https://api.github.com/repos/jordanhepburn/hsmi-intelligence"
-        "/actions/workflows/pricing_engine.yml/dispatches",
+        f"https://api.github.com/repos/jordanhepburn/hsmi-intelligence"
+        f"/actions/workflows/{workflow_file}/dispatches",
         headers={
-            "Authorization": f"Bearer {token}",
-            "Accept":        "application/vnd.github+json",
+            "Authorization":        f"Bearer {token}",
+            "Accept":               "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         },
         json={"ref": "main"},
@@ -888,14 +895,35 @@ async def cron_pricing_engine(request: Request):
     )
 
     if resp.status_code == 204:
-        logger.info("cron/pricing-engine: workflow triggered successfully")
+        logger.info("%s: workflow triggered successfully", label)
         return JSONResponse({"status": "triggered"})
 
-    logger.error(
-        "cron/pricing-engine: GitHub API returned %s — %s",
-        resp.status_code, resp.text[:200],
+    logger.error("%s: GitHub API returned %s — %s", label, resp.status_code, resp.text[:200])
+    return JSONResponse({"error": f"GitHub API returned {resp.status_code}"}, status_code=502)
+
+
+@app.post("/cron/housekeeping-report")
+async def cron_housekeeping_report(request: Request):
+    return _trigger_workflow(
+        "housekeeping_report.yml",
+        "cron/housekeeping-report",
+        request.headers.get("x-cron-secret", ""),
     )
-    return JSONResponse(
-        {"error": f"GitHub API returned {resp.status_code}"},
-        status_code=502,
+
+
+@app.post("/cron/housekeeping-roster")
+async def cron_housekeeping_roster(request: Request):
+    return _trigger_workflow(
+        "housekeeping_roster.yml",
+        "cron/housekeeping-roster",
+        request.headers.get("x-cron-secret", ""),
+    )
+
+
+@app.post("/cron/competitor-signal")
+async def cron_competitor_signal(request: Request):
+    return _trigger_workflow(
+        "competitor_signal.yml",
+        "cron/competitor-signal",
+        request.headers.get("x-cron-secret", ""),
     )

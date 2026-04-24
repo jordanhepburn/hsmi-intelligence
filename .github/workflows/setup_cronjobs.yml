@@ -1,0 +1,33 @@
+name: Setup Cron Jobs
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/setup_cronjobs.py'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  setup:
+    name: Register cron-job.org jobs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run setup_cronjobs.py
+        env:
+          CRONJOB_API_KEY: ${{ secrets.CRONJOB_API_KEY }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: python scripts/setup_cronjobs.py
