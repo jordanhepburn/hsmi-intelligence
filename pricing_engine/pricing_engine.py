@@ -781,7 +781,7 @@ class PricingEngine:
             f"*Occupancy snapshot — next 7 days*",
         ]
 
-        alerts: list[str] = []
+        high_demand: list[str] = []
 
         for i in range(7):
             d = self.today + timedelta(days=i)
@@ -789,29 +789,23 @@ class PricingEngine:
             day_label = d.strftime("%a %d %b")
             occ_data = self._occupancy.get(d_str, {})
 
-            # Property-wide occupancy for this date
             booked = sum(
                 round(occ_data.get(code, 0.0) * rt["total_rooms"])
                 for code, rt in self._room_type_map.items()
             )
-            overall_pct = booked / total_capacity * 100 if total_capacity else 0
+            pct = booked / total_capacity * 100 if total_capacity else 0
+            pct_int = round(pct)
 
-            # Room types at ≥70% (entering the +25% / +35% bracket territory)
-            high = [
-                f"{code} {occ_data.get(code, 0.0) * 100:.0f}%"
-                for code in sorted(self._room_type_map)
-                if occ_data.get(code, 0.0) >= 0.70
-            ]
-            high_str = "  ⚠️ " + ", ".join(high) if high else ""
-            lines.append(f"  {day_label}   {overall_pct:3.0f}% full{high_str}")
+            if booked > 0:
+                lines.append(f"  {day_label}   {pct_int:3d}% full  ({booked}/{total_capacity} rooms)")
+            else:
+                lines.append(f"  {day_label}     0% full")
 
-            # Collect dates with any room type ≥70% for the alert block
-            if high:
-                alerts.append(f"  {day_label}: {', '.join(high)}")
+            if pct >= 70:
+                high_demand.append(f"{day_label} ({pct_int}%)")
 
-        if alerts:
-            lines += ["", "*High occupancy (≥70%) in next 7 days*"]
-            lines.extend(alerts)
+        if high_demand:
+            lines += ["", f"*High demand nights:* {', '.join(high_demand)}"]
 
         lines += ["", f"📋 https://www.notion.so/349c905ced6b81d1be30d33aa3cf15eb"]
         return "\n".join(lines)
