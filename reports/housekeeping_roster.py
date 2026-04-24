@@ -57,6 +57,7 @@ LOOKAHEAD   = 14
 
 # Max turnovers Dwayne + Leanne can handle per day (0=Mon … 6=Sun)
 TURNOVER_CAPACITY = {0: 6, 1: 3, 2: 0, 3: 3, 4: 6, 5: 6, 6: 6}
+SUNDAY_MIN_CLEAN  = 8
 
 _CANCELLED = {"cancelled", "canceled", "no_show", "no-show", "noshow"}
 
@@ -169,10 +170,10 @@ class HousekeepingRoster:
                 else:
                     flag = "✅ quiet"
 
-            elif dow == 6:  # Sunday — defer extras to Monday
+            elif dow == 6:  # Sunday — always clean at least SUNDAY_MIN_CLEAN, defer rest to Monday
                 extras   = max(0, 2 - max(0, vacant - n_to))
-                must     = n_to + extras
-                deferred = max(0, n_co - extras)
+                must     = max(n_to + extras, SUNDAY_MIN_CLEAN)
+                deferred = max(0, (n_to + n_co) - must)
                 sunday_deferrals = deferred
                 if must > 6:
                     flag = f"⚠️  consider casuals — {must} needed | defer {deferred} to Mon"
@@ -272,12 +273,12 @@ class HousekeepingRoster:
         for r in rows:
             date_label = r["date"].strftime("%a %d %b")
             lines.append(
-                f"📅 {date_label:<11}  {r['n_to']:>2} TO  {r['n_co']:>2} CO   {r['flag']}"
+                f"📅 {date_label:<11}  {r['n_to']:>2} turnovers  {r['n_co']:>2} checkouts   {r['flag']}"
             )
 
         lines += [
             "",
-            "_TO = turnovers (must clean 10am–2pm) | CO = checkouts only (flexible)_",
+            "_turnovers = same room checking out + in (must clean 10am–2pm) | checkouts = departure only (flexible)_",
             "_Capacity: Mon/Fri/Sat/Sun 6 | Tue/Thu 3 | Wed 0 (D+L off)_",
         ]
 

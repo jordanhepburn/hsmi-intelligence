@@ -447,7 +447,8 @@ class HousekeepingReport:
             else:
                 status_col = status
 
-            notes_col  = r["notes_text"] or "-"
+            raw        = r["notes_text"] or "-"
+            notes_col  = (raw[:60] + "...") if len(raw) > 60 else raw
             room_label = f"{room_num} {room_type}"
 
             if r["keywords"]:
