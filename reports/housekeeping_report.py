@@ -158,9 +158,9 @@ class HousekeepingReport:
                 checkin_details.append(d)
 
         # Build roomID → checkin detail map for Arriving Guest / Notes columns.
-        # Cloudbeds returns roomID in different formats across endpoints
-        # (e.g. "8444747503112281-6" vs "8444747503112281") so normalise both
-        # sides by stripping any trailing -NNN suffix before indexing/lookup.
+        # Both getHousekeepingStatus and getReservation assigned[] use the full
+        # "roomTypeID-unitNumber" format (e.g. "8444747503112281-6"), so match
+        # on the full ID.
         room_id_to_checkin: dict[str, dict] = {}
         for detail in checkin_details:
             for assignment in (detail.get("rooms") or detail.get("assigned") or []):
@@ -170,8 +170,12 @@ class HousekeepingReport:
                         assignment.get("physicalRoomID") or ""
                     )
                     if rid:
-                        room_id_to_checkin[rid.split("-")[0]] = detail
-        logger.info("Checkin room assignments resolved: %d rooms", len(room_id_to_checkin))
+                        room_id_to_checkin[rid] = detail
+        logger.info(
+            "Checkin room assignments resolved: %d rooms — keys: %s",
+            len(room_id_to_checkin),
+            list(room_id_to_checkin.keys()),
+        )
 
         # Step 3: Derive status for each room and build row data
         rows: list[dict] = []
@@ -190,8 +194,15 @@ class HousekeepingReport:
             room_num  = int(m.group(1))
             room_type = ROOMS.get(room_num, "?")
 
-            # Look up arriving guest for this room (normalise ID to strip -NNN suffix)
-            checkin_detail = room_id_to_checkin.get(room_id.split("-")[0])
+            # Look up arriving guest using the full roomID
+            checkin_detail = room_id_to_checkin.get(room_id)
+            if len(rows) < 3:
+                logger.info(
+                    "DEBUG roomID match — hs roomID=%r checkin_keys=%s matched=%s",
+                    room_id,
+                    list(room_id_to_checkin.keys())[:5],
+                    checkin_detail is not None,
+                )
 
             # Determine status — checkin_detail (guest arriving today) takes
             # priority over condition so a dirty room with an incoming guest
