@@ -24,7 +24,7 @@ import logging
 import os
 import re
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 
 import requests
@@ -126,7 +126,10 @@ class HousekeepingReport:
         self.webhook = os.environ.get("SLACK_OPERATIONS_WEBHOOK_URL", "").strip()
         if not self.webhook:
             logger.warning("SLACK_OPERATIONS_WEBHOOK_URL not set — report will print to stdout only")
-        self.today = date.today()
+        # Use AEST (UTC+10) — report runs at 7am AEST = 9pm UTC the previous day,
+        # so date.today() (UTC) would return yesterday's date.
+        _AEST = timezone(timedelta(hours=10))
+        self.today = datetime.now(_AEST).date()
 
     # ------------------------------------------------------------------
     # Entry point
@@ -153,7 +156,10 @@ class HousekeepingReport:
             if d:
                 checkin_details.append(d)
 
-        # Build roomID → checkin detail map for Arriving Guest / Notes columns
+        # Build roomID → checkin detail map for Arriving Guest / Notes columns.
+        # Cloudbeds returns roomID in different formats across endpoints
+        # (e.g. "8444747503112281-6" vs "8444747503112281") so normalise both
+        # sides by stripping any trailing -NNN suffix before indexing/lookup.
         room_id_to_checkin: dict[str, dict] = {}
         for detail in checkin_details:
             for assignment in (detail.get("rooms") or detail.get("assigned") or []):
@@ -163,7 +169,7 @@ class HousekeepingReport:
                         assignment.get("physicalRoomID") or ""
                     )
                     if rid:
-                        room_id_to_checkin[rid] = detail
+                        room_id_to_checkin[rid.split("-")[0]] = detail
         logger.info("Checkin room assignments resolved: %d rooms", len(room_id_to_checkin))
 
         # Step 3: Derive status for each room and build row data
@@ -183,16 +189,22 @@ class HousekeepingReport:
             room_num  = int(m.group(1))
             room_type = ROOMS.get(room_num, "?")
 
-            # Look up arriving guest for this room
-            checkin_detail = room_id_to_checkin.get(room_id)
+            # Look up arriving guest for this room (normalise ID to strip -NNN suffix)
+            checkin_detail = room_id_to_checkin.get(room_id.split("-")[0])
 
-            # Determine status
+            # Determine status — checkin_detail (guest arriving today) takes
+            # priority over condition so a dirty room with an incoming guest
+            # shows as TURNOVER/CHECKIN rather than DIRTY.
             if fd_status == "check-out" and checkin_detail:
                 status = "TURNOVER"
             elif fd_status == "check-out":
                 status = "CHECKOUT"
             elif fd_status == "check-in":
                 status = "CHECKIN"
+            elif checkin_detail and condition == "dirty":
+                status = "TURNOVER"   # guest arriving, room still dirty = needs turnover
+            elif checkin_detail:
+                status = "CHECKIN"    # guest arriving, room clean
             elif condition == "dirty":
                 status = "DIRTY"
             else:
