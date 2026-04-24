@@ -797,9 +797,9 @@ class PricingEngine:
             pct_int = round(pct)
 
             if booked > 0:
-                lines.append(f"  {day_label}   {pct_int:3d}% full  ({booked}/{total_capacity} rooms)")
+                lines.append(f"  {day_label}   {pct_int:3d}% booked  ({booked}/{total_capacity} rooms)")
             else:
-                lines.append(f"  {day_label}     0% full")
+                lines.append(f"  {day_label}     0% booked")
 
             if pct >= 70:
                 high_demand.append(f"{day_label} ({pct_int}%)")
