@@ -58,15 +58,22 @@ TOTAL_ROOMS = 18
 LOOKAHEAD   = 14
 
 # Rostered hours per day (0=Mon … 6=Sun).  1 hr = 1 room cleaned.
-LISA_HOURS   = {0: 6, 1: 2, 2: 0, 3: 0, 4: 5, 5: 6, 6: 6}
 DWAYNE_HOURS = {0: 6, 1: 2, 2: 0, 3: 0, 4: 5, 5: 6, 6: 6}
-TOTAL_CLEAN_CAPACITY = {dow: LISA_HOURS[dow] + DWAYNE_HOURS[dow] for dow in range(7)}
-# = {0:12, 1:4, 2:0, 3:0, 4:10, 5:12, 6:12}
+LISA_HOURS   = {0: 6, 1: 2, 2: 0, 3: 0, 4: 5, 5: 6, 6: 6}
+JODIE_HOURS  = {0: 6, 1: 0, 2: 4, 3: 4, 4: 0, 5: 2, 6: 0}
 
-# Turnovers must happen in the 10am–2pm window — tighter than general cleaning.
-# Tue/Thu only Lisa's hours count (Dwayne not available for that window).
-# Sat/Sun both staff available for full reset.
-TURNOVER_CAPACITY = {0: 6, 1: 2, 2: 0, 3: 0, 4: 5, 5: 12, 6: 12}
+TOTAL_HOURS = {d: DWAYNE_HOURS[d] + LISA_HOURS[d] + JODIE_HOURS[d] for d in range(7)}
+# Mon:18, Tue:4, Wed:4, Thu:4, Fri:10, Sat:14, Sun:12
+
+# Max turnovers (10am–2pm hard window).
+# 9 = observed max for D+L together. Sunday capped at 6 (higher pay, Dwayne on maintenance).
+MAX_TURNOVERS = {0: 9, 1: 4, 2: 4, 3: 4, 4: 9, 5: 9, 6: 6}
+
+# Max total cleans per day (turnovers + checkouts, full day).  1 hr per room.
+MAX_CLEANS = TOTAL_HOURS
+
+# Lisa handles cleans first; Dwayne fills overflow then maintenance/reno/garden.
+LISA_CLEAN_CAP = LISA_HOURS
 
 _CANCELLED = {"cancelled", "canceled", "no_show", "no-show", "noshow"}
 
@@ -160,67 +167,76 @@ class HousekeepingRoster:
             n_to = len(turnovers_set)
             n_co = len(checkouts_only_set)
 
-            # Rooms occupied tonight (new checkins staying over, not same-day checkouts)
-            tonight_occupied = len(checkins_today - checkouts_today)
-            vacant = TOTAL_ROOMS - tonight_occupied
-
             # ------------------------------------------------------------------
             # Capacity / flag logic
             # ------------------------------------------------------------------
 
-            total_cap       = TOTAL_CLEAN_CAPACITY[dow]
-            turn_cap        = TURNOVER_CAPACITY[dow]
             total_available = n_to + n_co
-            must_clean      = min(total_available, max(n_to, total_cap))
-            deferred        = max(0, total_available - must_clean)
+            max_to  = MAX_TURNOVERS[dow]
+            max_cl  = MAX_CLEANS[dow]
+            lisa_cap  = LISA_CLEAN_CAP[dow]
+            jodie_hrs = JODIE_HOURS[dow]
 
-            if dow in (2, 3):  # Wednesday and Thursday — D+L both off
-                if n_to > 0:
-                    flag = f"🚨 D+L off — arrange casuals ({n_to} turnovers)"
+            can_clean = min(total_available, max_cl)
+            deferred  = max(0, total_available - can_clean)
+
+            # Dwayne is on maintenance unless his cleaning help is needed
+            dwayne_clean_needed  = max(0, n_to - lisa_cap - jodie_hrs)
+            dwayne_on_maintenance = dwayne_clean_needed <= 0
+
+            if dow in (2, 3):  # Wednesday / Thursday — Jodie only, D+L off
+                if n_to > max_to:
+                    flag = f"🚨 Jodie only — arrange extra casuals ({n_to} turnovers, cap {max_to})"
+                elif n_to > 0:
+                    flag = f"✅ Jodie handles {n_to} turnovers | D+L off"
                 elif n_co > 0:
-                    flag = f"✅ D+L off — {n_co} checkouts (arrange casuals if needed)"
+                    flag = f"✅ Jodie: {n_co} checkouts | D+L off"
                 else:
                     flag = "✅ D+L off — quiet"
 
-            elif dow == 5:  # Saturday — full reset, both staff
-                if n_to > 12:
-                    flag = f"🚨 ARRANGE CASUALS — {n_to} turnovers (cap 12)"
+            elif dow == 5:  # Saturday — full reset, D+L+Jodie
+                if n_to > max_to:
+                    flag = f"🚨 ARRANGE CASUALS — {n_to} turnovers (cap {max_to})"
                 elif deferred > 0:
-                    flag = f"🚨 ARRANGE CASUALS — {deferred} rooms over capacity"
-                elif n_to > 6:
-                    flag = f"⚠️  heavy day — Dwayne + Lisa both needed ({n_to} turnovers)"
+                    flag = f"🚨 over capacity — defer {deferred} rooms"
                 else:
-                    flag = f"✅ full reset — {must_clean} rooms"
+                    dwayne_note = " | Dwayne: maintenance after cleans" if dwayne_on_maintenance else ""
+                    flag = f"✅ clean {can_clean} of {total_available}{dwayne_note}"
 
-            elif dow == 6:  # Sunday — clean to capacity, defer rest to Monday
+            elif dow == 6:  # Sunday — D+L, cap turnovers at 6, Dwayne on maintenance
                 sunday_deferrals = deferred
-                if n_to > 12:
-                    flag = f"⚠️  consider casuals — {n_to} turnovers"
-                elif deferred > 0:
-                    flag = f"✅ clean {must_clean} | defer {deferred} to Mon"
+                if n_to > max_to:
+                    flag = (
+                        f"⚠️  {n_to} turnovers (cap 6, higher pay day)"
+                        f" | defer {deferred} checkouts to Mon | consider casuals"
+                    )
                 else:
-                    flag = f"✅ clean {must_clean}"
+                    defer_note  = f" | defer {deferred} to Mon" if deferred > 0 else ""
+                    dwayne_note = " | Dwayne: cleans then maintenance" if n_to > lisa_cap else " | Dwayne: maintenance"
+                    flag = f"✅ clean {can_clean}{defer_note}{dwayne_note}"
 
-            elif dow == 0:  # Monday — absorb Sunday deferrals
-                total_monday = n_to + sunday_deferrals + n_co
-                must_clean   = min(total_monday, total_cap)
-                deferred     = max(0, total_monday - must_clean)
-                note = f" +{sunday_deferrals} deferred from Sun" if sunday_deferrals else ""
+            elif dow == 0:  # Monday — absorb Sunday deferrals, D+L+Jodie
+                total_monday  = n_to + sunday_deferrals + n_co
+                can_clean_mon = min(total_monday, max_cl)
+                deferred_mon  = max(0, total_monday - can_clean_mon)
+                note = f" +{sunday_deferrals} from Sun" if sunday_deferrals else ""
                 sunday_deferrals = 0
-                if n_to > turn_cap:
-                    flag = f"🚨 arrange casuals — {n_to} turnovers{note}"
-                elif deferred > 0:
-                    flag = f"✅ clean {must_clean}{note} | {deferred} carry to Tue"
+                if n_to > max_to:
+                    flag = f"🚨 arrange casuals — {n_to} turnovers{note} (cap {max_to})"
+                elif deferred_mon > 0:
+                    flag = f"⚠️  {deferred_mon} rooms carry to Tue | clean {can_clean_mon}{note}"
                 else:
-                    flag = f"✅ clean {must_clean}{note}"
+                    dwayne_note = " | Dwayne: cleans then maintenance" if n_to > lisa_cap + jodie_hrs else " | Dwayne: maintenance"
+                    flag = f"✅ clean {can_clean_mon}{note}{dwayne_note}"
 
             else:  # Tuesday and Friday
-                if n_to > turn_cap:
-                    flag = f"🚨 arrange casuals — {n_to} turnovers (cap {turn_cap})"
+                if n_to > max_to:
+                    flag = f"🚨 arrange casuals — {n_to} turnovers (cap {max_to})"
                 elif deferred > 0:
-                    flag = f"✅ clean {must_clean} | defer {deferred}"
+                    flag = f"✅ clean {can_clean} | defer {deferred}"
                 else:
-                    flag = f"✅ clean {must_clean}" if must_clean > 0 else "✅ quiet"
+                    dwayne_note = " | Dwayne: maintenance" if dwayne_on_maintenance and dow == 4 else ""
+                    flag = f"✅ clean {can_clean}{dwayne_note}" if can_clean > 0 else "✅ quiet"
 
             rows.append({"date": d, "n_to": n_to, "n_co": n_co, "flag": flag})
 
@@ -299,8 +315,8 @@ class HousekeepingRoster:
 
         lines += [
             "",
-            "_Capacity: Mon 12 | Tue 4 | Wed/Thu 0 (D+L off) | Fri 10 | Sat/Sun 12_",
-            "_Turnovers must be cleaned 10am–2pm | Checkouts are flexible_",
+            "_Capacity: Mon 9 TO/18 cleans | Tue 4/4 | Wed/Thu 4/4 (Jodie, D+L off) | Fri 9/10 | Sat 9/14 | Sun 6/12_",
+            "_TO = turnovers (10am–2pm) | Cleans = turnovers + checkouts (full day)_",
         ]
 
         return "\n".join(lines)
