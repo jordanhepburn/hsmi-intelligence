@@ -250,8 +250,7 @@ class HousekeepingReport:
                 "dirty_label":   dirty_label,
             })
 
-        # Sort: priority first, then room number
-        rows.sort(key=lambda r: (r["priority"], r["room_num"]))
+        rows.sort(key=lambda r: r["room_num"])
 
         logger.info(
             "Status summary — %s",
