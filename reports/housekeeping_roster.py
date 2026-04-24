@@ -202,16 +202,18 @@ class HousekeepingRoster:
                     maint_note = f" | Dwayne: {dwayne_maintenance}h maintenance" if dwayne_maintenance > 0 else ""
                     flag = f"✅ clean {rooms_cleaned}{maint_note}"
 
-            elif dow == 6:  # Sunday — D+L, always clean turnovers + 2 minimum, defer rest to Monday
-                must_clean         = max(n_to + 2, n_to)  # always at least turnovers + 2
+            elif dow == 6:  # Sunday — Lisa cleans to full capacity, Dwayne on maintenance
+                lisa_can_clean     = min(total_available, lisa_hrs)
+                dwayne_turnovers   = max(0, n_to - lisa_hrs)  # Dwayne only helps if turnovers exceed Lisa
+                dwayne_maintenance = max(0, dwayne_hrs - dwayne_turnovers)
+                must_clean         = lisa_can_clean
                 sunday_deferrals   = max(0, total_available - must_clean)
-                dwayne_maintenance = max(0, dwayne_hrs - max(0, must_clean - lisa_hrs))
                 if n_to > max_to:
                     flag = f"🚨 consider casuals — {n_to} turnovers (cap {max_to}, high pay day)"
                 else:
-                    defer_note = f" | defer {sunday_deferrals} to Mon (keeps Jodie busy)" if sunday_deferrals > 0 else ""
+                    defer_note = f" | defer {sunday_deferrals} to Mon" if sunday_deferrals > 0 else ""
                     maint_note = f" | Dwayne: {dwayne_maintenance}h maintenance" if dwayne_maintenance > 0 else ""
-                    flag = f"✅ clean {must_clean}{defer_note}{maint_note}"
+                    flag = f"✅ Lisa cleans {must_clean}{defer_note}{maint_note}"
 
             elif dow == 0:  # Monday — D+L+Jodie, absorbs Sunday deferrals
                 total_monday       = n_to + sunday_deferrals + n_co
