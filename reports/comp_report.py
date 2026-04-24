@@ -17,7 +17,10 @@ Environment variables:
 import logging
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_MELB = ZoneInfo("Australia/Melbourne")
 from typing import Optional
 
 import requests
@@ -325,7 +328,7 @@ def _build_message(friday: date, nights: dict) -> str:
     sep = "─" * (_NAME_COL + _PRICE_COL * 3)
 
     lines: list[str] = [
-        f"*HSMI Weekly Comp Report — {date.today().strftime('%a %d %b %Y')}*",
+        f"*HSMI Weekly Comp Report — {datetime.now(_MELB).strftime('%a %d %b %Y')}*",
         f"_Coming weekend: {friday.strftime('%a %d %b')} · {saturday.strftime('%a %d %b')} · {sunday.strftime('%a %d %b')}_",
         "",
         "```",
@@ -414,7 +417,7 @@ def run() -> None:
         logger.critical("Missing required environment variables: %s", ", ".join(missing))
         sys.exit(1)
 
-    today  = date.today()
+    today  = datetime.now(_MELB).date()
     friday = _next_friday(today)
     logger.info(
         "=== HSMI Weekly Comp Report — %s | Weekend: %s/%s/%s ===",

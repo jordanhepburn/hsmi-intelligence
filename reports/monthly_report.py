@@ -20,7 +20,10 @@ import calendar
 import logging
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_MELB = ZoneInfo("Australia/Melbourne")
 from typing import Optional
 
 import requests
@@ -115,7 +118,7 @@ class MonthlyReport:
         self._code_to_total: dict[str, int] = {k: v["total_rooms"] for k, v in ROOM_TYPE_ID_MAP.items()}
 
     def run(self) -> None:
-        today = date.today()
+        today = datetime.now(_MELB).date()
         first, last = _prev_month(today)
         month_label = first.strftime("%B %Y")
         logger.info("=== HSMI Monthly Report — %s ===", month_label)

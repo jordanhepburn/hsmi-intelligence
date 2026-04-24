@@ -134,7 +134,7 @@ class PricingEngine:
 
         self.client = CloudbedsClient(api_key=api_key, property_id=property_id)
         self.slack_webhook = os.environ.get("SLACK_PRICING_WEBHOOK_URL", "").strip()
-        self.today = date.today()
+        self.today = datetime.now(AEST).date()
 
         # GitHub schedule trigger → daily 60-day base run.
         # workflow_dispatch (cron-job.org hourly) → 14-day window.
@@ -514,7 +514,7 @@ class PricingEngine:
         logger.info("Step 5: Calculating target rates")
 
         time_window, time_str = _get_time_window()
-        utc_hour = datetime.utcnow().hour
+        melb_hour = datetime.now(AEST).hour
         window_desc = {
             "MORNING":   "full brackets active",
             "AFTERNOON": "capped increases (+20% max), discount urgency +5pp",
@@ -574,7 +574,7 @@ class PricingEngine:
                     continue
 
                 # ── Special case: same-day 3pm+ AEST (UTC≥5), occ <40% — drop to floor ──
-                if is_same_day and utc_hour >= 5 and occ_pct < 0.40:
+                if is_same_day and melb_hour >= 15 and occ_pct < 0.40:
                     rate = math.ceil(max(floor_, min(ceiling_, cfg["floor"])) / 5) * 5
                     self._target_rates[d_str][code] = rate
                     self._rate_reasons.setdefault(d_str, {})[code] = "3PM floor"

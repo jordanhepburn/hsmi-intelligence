@@ -31,6 +31,9 @@ import logging
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+_MELB = ZoneInfo("Australia/Melbourne")
 from pathlib import Path
 from typing import Optional
 
@@ -345,7 +348,7 @@ def build_and_write_cache(api_key: str) -> dict:
     from Google Hotels results, the TWI base rate is fetched from Cloudbeds
     as a fallback so the competitor comparison always has an HSMI price.
     """
-    today = date.today()
+    today = datetime.now(_MELB).date()
     d1, d2 = _target_dates(today)
     logger.info(
         "Target dates: %s (%s) and %s (%s)",
@@ -426,7 +429,7 @@ def _engine_recommendation(sig: dict) -> str:
 
 
 def post_slack_summary(cache: dict, webhook_url: str) -> None:
-    today = date.today()
+    today = datetime.now(_MELB).date()
     lines = [
         f"*HSMI Competitor Signal — {today.strftime('%a %d %b %Y')}*",
         f"_9am market snapshot — rate push triggered_",
@@ -500,7 +503,7 @@ def run() -> None:
         logger.critical("SERP_API_KEY environment variable not set")
         sys.exit(1)
 
-    logger.info("=== HSMI Competitor Signal — %s ===", date.today())
+    logger.info("=== HSMI Competitor Signal — %s ===", datetime.now(_MELB).date())
     cache = build_and_write_cache(api_key)
 
     webhook = os.environ.get("SLACK_PRICING_WEBHOOK_URL", "").strip()
