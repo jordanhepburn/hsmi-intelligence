@@ -128,6 +128,8 @@ def _update_job(api_key: str, job_id: int, job: dict) -> None:
         json={"job": job},
         timeout=15,
     )
+    if not resp.ok:
+        logger.error("PATCH /jobs/%s → %s: %s", job_id, resp.status_code, resp.text[:500])
     resp.raise_for_status()
     logger.info("Updated job %d: %s", job_id, job["title"])
 
@@ -139,6 +141,8 @@ def _create_job(api_key: str, job: dict) -> int:
         json={"job": job},
         timeout=15,
     )
+    if not resp.ok:
+        logger.error("PUT /jobs → %s: %s", resp.status_code, resp.text[:500])
     resp.raise_for_status()
     job_id = resp.json().get("jobId")
     logger.info("Created job %s → ID %s", job["title"], job_id)
