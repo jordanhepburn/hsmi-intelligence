@@ -227,11 +227,17 @@ def _process_night(data: dict) -> dict:
       comp_avg / comp_count / hsmi_vs_comp_pct
     """
     # Top-level structure: {status, message, timestamp, data}
-    # data structure: {hotels: [...], meta: {...}, appear: [...]}
+    # data structure: {hotels: [...], meta: [...], appear: [...]}
     # Each hotel: {hotel_id, accessibilityLabel, property: {...}}
-    payload     = data.get("data", data)
-    search_meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
-    props       = payload.get("hotels", []) if isinstance(payload, dict) else []
+    payload        = data.get("data", data)
+    props          = payload.get("hotels", []) if isinstance(payload, dict) else []
+    meta_raw   = payload.get("meta") if isinstance(payload, dict) else None
+    if isinstance(meta_raw, dict):
+        search_meta = meta_raw
+    elif isinstance(meta_raw, list):
+        search_meta = {k: v for d in meta_raw if isinstance(d, dict) for k, v in d.items()}
+    else:
+        search_meta = {}
 
     logger.info("  API returned %d hotel records", len(props))
 

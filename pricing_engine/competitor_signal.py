@@ -257,17 +257,21 @@ def _process_booking_response(data: dict) -> dict:
     pricing engine needs no changes.
     """
     # Top-level structure: {status, message, timestamp, data}
-    # data structure: {hotels: [...], meta: {...}, appear: [...]}
+    # data structure: {hotels: [...], meta: [...], appear: [...]}
     # Each hotel: {hotel_id, accessibilityLabel, property: {...}}
     payload        = data.get("data", data)
-    search_meta    = payload.get("meta", {}) if isinstance(payload, dict) else {}
     properties_raw = payload.get("hotels", []) if isinstance(payload, dict) else []
+    # meta is a list of info dicts; convert to merged dict for easy key lookup
+    meta_raw   = payload.get("meta") if isinstance(payload, dict) else None
+    if isinstance(meta_raw, dict):
+        search_meta = meta_raw
+    elif isinstance(meta_raw, list):
+        search_meta = {k: v for d in meta_raw if isinstance(d, dict) for k, v in d.items()}
+    else:
+        search_meta = {}
 
-    # Check for API error response (only has 'status'/'message', no 'data')
-    if isinstance(payload, dict) and not payload.get("hotels") and not payload.get("meta"):
-        logger.warning("  API response missing 'data' — top keys: %s | message: %s",
-                       list(data.keys()), data.get("message", "n/a"))
-    logger.info("  API returned %d hotel records", len(properties_raw))
+    logger.info("  API returned %d hotel records | meta keys: %s",
+                len(properties_raw), list(search_meta.keys())[:8] if search_meta else "none")
 
     # --- Booking.com sold-out banner ---
     # `sold_out_percentage` in data.meta mirrors the top-of-page banner
