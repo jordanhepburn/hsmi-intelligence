@@ -263,6 +263,14 @@ def _process_booking_response(data: dict) -> dict:
     search_meta    = payload.get("meta", {}) if isinstance(payload, dict) else {}
     properties_raw = payload.get("hotels", []) if isinstance(payload, dict) else []
 
+    logger.info("  Raw response top keys: %s", list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__)
+    if isinstance(payload, dict):
+        logger.info("  meta keys: %s", list(search_meta.keys()) if search_meta else "empty")
+        logger.info("  hotels count: %d | appear count: %d", len(properties_raw), len(payload.get("appear", [])))
+        if properties_raw:
+            logger.info("  First hotel keys: %s", list(properties_raw[0].keys()))
+            if "property" in properties_raw[0]:
+                logger.info("  First property keys: %s", list(properties_raw[0]["property"].keys())[:10])
     logger.info("  API returned %d hotel records", len(properties_raw))
 
     # --- Booking.com sold-out banner ---
