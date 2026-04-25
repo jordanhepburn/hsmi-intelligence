@@ -71,7 +71,7 @@ _PHONE = "oh three, five three four eight, two five seven two"
 
 def _cb() -> CloudbedsClient:
     return CloudbedsClient(
-        api_key=os.environ["CLOUDBEDS_API_KEY"],
+        api_key=os.environ.get("CHERRY_CLOUDBEDS_API_KEY") or os.environ["CLOUDBEDS_API_KEY"],
         property_id=os.environ["CLOUDBEDS_PROPERTY_ID"],
     )
 
