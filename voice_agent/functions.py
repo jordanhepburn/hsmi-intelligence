@@ -487,30 +487,39 @@ async def hold_room(request: Request):
     if room_code and room_code in ROOM_TYPE_ID_MAP:
         try:
             from config import BASE_RATE_IDS
-            adults_count   = max(int(num_guests), 1)
-            room_type_id   = cfg["id"]
-            rate_id        = BASE_RATE_IDS.get(room_code, "")
-            # Cloudbeds postReservation requires form-encoded arrays for rooms/adults/children
+            adults_count = max(int(num_guests), 1)
+            room_type_id = cfg["id"]
+            rate_id      = BASE_RATE_IDS.get(room_code, "")
+            property_id  = os.environ.get("CLOUDBEDS_PROPERTY_ID", "").strip()
+
+            # Payload format confirmed working via API testing 25 Apr 2026.
+            # Must be form-encoded (data=), not JSON.
             payload = {
-                "startDate":               checkin_str,
-                "endDate":                 checkout_str,
-                "guestFirstName":          first_name,
-                "guestLastName":           last_name,
-                "guestEmail":              guest_email or "",
-                "guestPhone":              guest_phone or "",
-                "guestCountry":            "AU",
-                "paymentMethod":           "cash",
-                "rooms[0][roomTypeID]":    room_type_id,
-                "rooms[0][rateID]":        rate_id,
-                "rooms[0][quantity]":      1,
-                "adults[0][roomTypeID]":   room_type_id,
-                "adults[0][quantity]":     adults_count,
-                "children[0][roomTypeID]": room_type_id,
-                "children[0][quantity]":   0,
+                "propertyID":               property_id,
+                "sourceID":                 "s-3-1",        # Phone, primary source
+                "startDate":                checkin_str,
+                "endDate":                  checkout_str,
+                "guestFirstName":           first_name,
+                "guestLastName":            last_name,
+                "guestEmail":               guest_email or "",
+                "guestPhone":               guest_phone or "",
+                "guestCountry":             "AU",
+                "guestZip":                 "3461",
+                "paymentMethod":            "cash",
+                "rooms[0][roomTypeID]":     room_type_id,
+                "rooms[0][rateID]":         rate_id,
+                "rooms[0][quantity]":       "1",
+                "adults[0][roomTypeID]":    room_type_id,
+                "adults[0][quantity]":      "1",
+                "adults[0][adults]":        str(adults_count),
+                "children[0][roomTypeID]":  room_type_id,
+                "children[0][quantity]":    "1",
+                "children[0][children]":    "0",
+                "sendEmailConfirmation":    "true",
+                "estimatedArrivalTime":     "15:00",
             }
             logger.info("postReservation payload: %s", payload)
             client = _cb()
-            # Must use data= (form-encoded), not json= (JSON body)
             resp   = client._request("POST", "postReservation", data=payload)
             logger.info("postReservation response: %s", resp)
 
