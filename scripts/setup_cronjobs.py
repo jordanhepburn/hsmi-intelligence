@@ -38,9 +38,6 @@ logger = logging.getLogger(__name__)
 API_BASE    = "https://api.cron-job.org"
 RAILWAY_URL = "https://web-production-687b3.up.railway.app"
 
-# Existing pricing engine job — always update by ID, never create a duplicate.
-PRICING_ENGINE_JOB_ID = 7516426
-
 # ---------------------------------------------------------------------------
 # Job definitions
 # All times are UTC. AEST = UTC+10 (no DST in April–October; AEDT = UTC+11).
@@ -69,17 +66,14 @@ def _make_job(title: str, path: str, hours: list[int], minutes: list[int], cron_
 
 def build_jobs(cron_secret: str) -> list[dict]:
     return [
-        {
-            "id":  PRICING_ENGINE_JOB_ID,   # update existing, never duplicate
-            **_make_job(
-                title="HSMI Pricing Engine",
-                path="/cron/pricing-engine",
-                # 7pm–7am AEST = 9am–9pm UTC (covers 7am–7pm Melbourne time)
-                hours=list(range(21, 24)) + list(range(0, 10)),
-                minutes=[0],
-                cron_secret=cron_secret,
-            ),
-        },
+        _make_job(
+            title="HSMI Pricing Engine",
+            path="/cron/pricing-engine",
+            # 7pm–7am AEST = 9am–9pm UTC (covers 7am–7pm Melbourne time)
+            hours=list(range(21, 24)) + list(range(0, 10)),
+            minutes=[0],
+            cron_secret=cron_secret,
+        ),
         _make_job(
             title="HSMI HK Report",
             path="/cron/housekeeping-report",
@@ -169,18 +163,22 @@ def main() -> None:
     existing_by_title = {j["title"]: j["jobId"] for j in existing}
     logger.info("Found %d existing jobs", len(existing))
 
+    errors = 0
     for job in jobs:
-        job_id   = job.pop("id", None)          # explicit ID wins
-        title    = job["title"]
+        title  = job["title"]
+        job_id = existing_by_title.get(title)
+        try:
+            if job_id is not None:
+                _update_job(api_key, job_id, job)
+            else:
+                _create_job(api_key, job)
+        except Exception as exc:
+            logger.error("Failed to upsert '%s': %s", title, exc)
+            errors += 1
 
-        if job_id is None:
-            job_id = existing_by_title.get(title)  # match by title
-
-        if job_id is not None:
-            _update_job(api_key, job_id, job)
-        else:
-            _create_job(api_key, job)
-
+    if errors:
+        logger.critical("%d job(s) failed — see errors above", errors)
+        sys.exit(1)
     logger.info("=== setup_cronjobs complete ===")
 
 
