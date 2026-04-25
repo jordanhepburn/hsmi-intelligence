@@ -16,6 +16,7 @@ Usage:
   python scripts/setup_cronjobs.py
 """
 
+import json
 import logging
 import os
 import sys
@@ -51,15 +52,17 @@ def _make_job(title: str, path: str, hours: list[int], minutes: list[int], cron_
         "saveResponses": True,
         "requestMethod": 1,  # POST
         "schedule": {
-            "timezone": "UTC",
-            "hours":    hours,
-            "minutes":  minutes,
-            "mdays":    [-1],   # every day of month
-            "months":   [-1],   # every month
-            "wdays":    [-1],   # every weekday
+            "timezone":  "UTC",
+            "expiresAt": 0,     # 0 = no expiry (required field)
+            "hours":     hours,
+            "minutes":   minutes,
+            "mdays":     [-1],  # every day of month
+            "months":    [-1],  # every month
+            "wdays":     [-1],  # every weekday
         },
         "extendedData": {
-            "headers": [{"key": "x-cron-secret", "value": cron_secret}],
+            "headers": {"x-cron-secret": cron_secret},  # dict, not array
+            "body": "",
         },
     }
 
@@ -117,10 +120,12 @@ def _list_jobs(api_key: str) -> list[dict]:
 
 def _update_job(api_key: str, job_id: int, job: dict) -> bool:
     """Returns True on success, False on 500 (skip gracefully)."""
+    payload = {"job": job}
+    logger.info("PATCH /jobs/%s payload:\n%s", job_id, json.dumps(payload, indent=2))
     resp = requests.patch(
         f"{API_BASE}/jobs/{job_id}",
         headers=_headers(api_key),
-        json={"job": job},
+        json=payload,
         timeout=15,
     )
     if resp.status_code == 500:
@@ -137,10 +142,12 @@ def _update_job(api_key: str, job_id: int, job: dict) -> bool:
 
 
 def _create_job(api_key: str, job: dict) -> int:
+    payload = {"job": job}
+    logger.info("PUT /jobs payload:\n%s", json.dumps(payload, indent=2))
     resp = requests.put(
         f"{API_BASE}/jobs",
         headers=_headers(api_key),
-        json={"job": job},
+        json=payload,
         timeout=15,
     )
     if not resp.ok:
