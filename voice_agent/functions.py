@@ -1008,3 +1008,23 @@ async def cron_competitor_signal(request: Request):
         "cron/competitor-signal",
         request.headers.get("x-cron-secret", ""),
     )
+
+
+# ---------------------------------------------------------------------------
+# Twilio inbound TwiML — dials Cherry via Retell SIP
+# ---------------------------------------------------------------------------
+
+from fastapi.responses import Response as FastAPIResponse  # noqa: E402
+
+@app.post("/twiml/inbound")
+@app.get("/twiml/inbound")
+async def twiml_inbound():
+    twiml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<Response>"
+        "<Dial>"
+        "<Sip>sip:+61343279502@sip.retellai.com;transport=tcp</Sip>"
+        "</Dial>"
+        "</Response>"
+    )
+    return FastAPIResponse(content=twiml, media_type="application/xml")
