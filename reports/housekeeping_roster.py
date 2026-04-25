@@ -15,9 +15,9 @@ Staffing (rostered hours = 1hr per room):
   Total:  Mon 12 | Tue 4 | Wed/Thu 0 (D+L off) | Fri 10 | Sat/Sun 12
 
 Environment variables:
-  CLOUDBEDS_API_KEY            — Cloudbeds API key (required)
-  CLOUDBEDS_PROPERTY_ID        — Cloudbeds property ID (required)
-  SLACK_PRICING_WEBHOOK_URL    — Slack #api-pricing-engine incoming webhook (required)
+  CLOUDBEDS_API_KEY              — Cloudbeds API key (required)
+  CLOUDBEDS_PROPERTY_ID          — Cloudbeds property ID (required)
+  SLACK_OPERATIONS_WEBHOOK_URL   — Slack #operations incoming webhook (required)
 """
 
 import logging
@@ -92,9 +92,9 @@ class HousekeepingRoster:
             sys.exit(1)
 
         self.client  = CloudbedsClient(api_key=api_key, property_id=property_id)
-        self.webhook = os.environ.get("SLACK_PRICING_WEBHOOK_URL", "").strip()
+        self.webhook = os.environ.get("SLACK_OPERATIONS_WEBHOOK_URL", "").strip()
         if not self.webhook:
-            logger.warning("SLACK_PRICING_WEBHOOK_URL not set — report will print to stdout only")
+            logger.warning("SLACK_OPERATIONS_WEBHOOK_URL not set — report will print to stdout only")
 
         now = datetime.now(ZoneInfo("Australia/Melbourne"))
         self.today = now.date()
@@ -213,10 +213,9 @@ class HousekeepingRoster:
                     flag = f"✅ clean {rooms_cleaned}{maint_note}"
 
             elif dow == 6:  # Sunday — Lisa cleans to full capacity, Dwayne on maintenance
-                lisa_can_clean     = min(total_available, lisa_hrs)
                 dwayne_turnovers   = max(0, n_to - lisa_hrs)  # Dwayne only helps if turnovers exceed Lisa
                 dwayne_maintenance = max(0, dwayne_hrs - dwayne_turnovers)
-                must_clean         = lisa_can_clean
+                must_clean         = lisa_hrs  # Lisa works full 6h shift regardless of room count
                 sunday_deferrals   = max(0, total_available - must_clean)
                 if n_to > max_to:
                     flag = f"🚨 consider casuals — {_to(n_to)} (cap {max_to})"

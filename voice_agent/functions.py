@@ -8,7 +8,8 @@ request body.  Each handler returns {"result": "..."} — the text Cherry
 speaks back to the caller.
 
 Environment variables:
-  CLOUDBEDS_API_KEY              — Cloudbeds API key
+  CHERRY_CLOUDBEDS_API_KEY       — Cherry-specific Cloudbeds API key (preferred)
+  CLOUDBEDS_API_KEY              — Cloudbeds API key (fallback if CHERRY key absent)
   CLOUDBEDS_PROPERTY_ID          — Cloudbeds property ID
   SLACK_OPERATIONS_WEBHOOK_URL   — Slack #operations incoming webhook
   SLACK_PHONE_CALLS_WEBHOOK_URL  — Slack #phone-calls incoming webhook
@@ -70,8 +71,12 @@ _PHONE = "oh three, five three four eight, two five seven two"
 
 
 def _cb() -> CloudbedsClient:
+    api_key = (
+        os.environ.get("CHERRY_CLOUDBEDS_API_KEY", "").strip()
+        or os.environ["CLOUDBEDS_API_KEY"]
+    )
     return CloudbedsClient(
-        api_key=os.environ["CLOUDBEDS_API_KEY"],
+        api_key=api_key,
         property_id=os.environ["CLOUDBEDS_PROPERTY_ID"],
     )
 

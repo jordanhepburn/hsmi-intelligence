@@ -236,6 +236,7 @@ def _process_response(data: dict) -> dict:
     comp_prices: list[float] = []
     comp_props: list[dict] = []   # [{name, price}] for each found PRICING_COMP
     reference_props: list[dict] = []
+    found_comp_keywords: set[str] = set()
 
     for p in props:
         nl = p.get("name", "").lower()
@@ -250,6 +251,10 @@ def _process_response(data: dict) -> dict:
             hsmi_price = price_num
             logger.info("  HSMI  [%s]: %s — %s%s", src, p.get("name"), price_str or "N/A", sold_tag)
         elif kind == "pricing_comp":
+            for kw in PRICING_COMPS:
+                if kw in nl:
+                    found_comp_keywords.add(kw)
+                    break
             if price_num:
                 comp_prices.append(price_num)
                 comp_props.append({"name": p.get("name", "?"), "price": price_num})
@@ -261,6 +266,12 @@ def _process_response(data: dict) -> dict:
             logger.debug("  SKIP  [%s]: %s (alias suppressed)", src, p.get("name"))
         else:
             logger.debug("  other [%s]: %s — %s", src, p.get("name"), price_str or "N/A")
+
+    missing_comp_keywords = [kw for kw in PRICING_COMPS if kw not in found_comp_keywords]
+    if missing_comp_keywords:
+        logger.info("  Comps NOT found in results: %s", missing_comp_keywords)
+    else:
+        logger.info("  All %d PRICING_COMPS found in results", len(PRICING_COMPS))
 
     comp_avg = sum(comp_prices) / len(comp_prices) if comp_prices else None
     hsmi_vs_comp_pct = (
@@ -286,6 +297,7 @@ def _process_response(data: dict) -> dict:
         "comp_max":        max(comp_prices) if comp_prices else None,
         "comp_count":      len(comp_prices),
         "comp_props":      comp_props,
+        "missing_comps":   missing_comp_keywords,
         "hsmi_vs_comp_pct": hsmi_vs_comp_pct,
         "reference_props": reference_props,
     }
@@ -313,6 +325,7 @@ def _fetch_cloudbeds_rate(cb_api_key: str, cb_property_id: str, d: date) -> Opti
         checkout = d + timedelta(days=1)
 
         fetched: list[float] = []
+        failed: list[str] = []
         for code in BASE_RATE_IDS:
             room_type_id = ROOM_TYPE_ID_MAP[code]["id"]
             try:
@@ -320,14 +333,22 @@ def _fetch_cloudbeds_rate(cb_api_key: str, cb_property_id: str, d: date) -> Opti
                 val = rates.get(d_str)
                 if val is not None:
                     fetched.append(val)
-                    logger.debug("  Cloudbeds %s: A$%.0f", code, val)
+                    logger.info("  Cloudbeds %s: A$%.0f", code, val)
+                else:
+                    failed.append(f"{code}(no rate)")
+                    logger.warning("  Cloudbeds %s: no rate returned for %s", code, d_str)
             except Exception as exc:
-                logger.debug("  Cloudbeds %s rate fetch failed: %s", code, exc)
+                failed.append(f"{code}(error)")
+                logger.warning("  Cloudbeds %s rate fetch failed: %s", code, exc)
 
         if not fetched:
+            logger.warning("  Cloudbeds fallback: no rates retrieved (failed: %s)", failed)
             return None
         avg = sum(fetched) / len(fetched)
-        logger.info("  Cloudbeds rates fetched: %s → avg A$%.0f", fetched, avg)
+        logger.info(
+            "  Cloudbeds fallback: %d/%d room types → avg A$%.0f (failed: %s)",
+            len(fetched), len(BASE_RATE_IDS), avg, failed or "none",
+        )
         return avg
     except Exception as exc:
         logger.warning("Cloudbeds rate fallback failed for %s: %s", d, exc)
@@ -463,11 +484,14 @@ def post_slack_summary(cache: dict, webhook_url: str) -> None:
 
         # Comp prices line
         comp_props = sig.get("comp_props", [])
+        missing_comps = sig.get("missing_comps", [])
         if comp_props:
             comp_parts = ", ".join(
                 f"{c['name'].split(',')[0]} ${c['price']:.0f}" for c in comp_props
             )
             lines.append(f"  _Comps: {comp_parts}_")
+        if missing_comps:
+            lines.append(f"  _Not found: {', '.join(missing_comps)}_")
 
         # Premium benchmarks — only show if at least one has a price
         ref = sig.get("reference_props", [])
