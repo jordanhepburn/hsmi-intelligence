@@ -15,10 +15,10 @@ jobs:
       - name: Create test reservation
         id: create
         run: |
+          # Variant: no propertyID in body (API key identifies property),
+          # no sourceID (avoids channel-not-enabled errors)
           RESPONSE=$(curl -s -X POST https://api.cloudbeds.com/api/v1.3/postReservation \
             -H "x-api-key: ${{ secrets.CLOUDBEDS_API_KEY }}" \
-            --data-urlencode "propertyID=${{ secrets.CLOUDBEDS_PROPERTY_ID }}" \
-            --data-urlencode "sourceID=s-3-1" \
             --data-urlencode "startDate=2026-06-15" \
             --data-urlencode "endDate=2026-06-16" \
             --data-urlencode "guestFirstName=Test" \
