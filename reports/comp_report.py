@@ -2,16 +2,15 @@
 HSMI Weekly Comp Report
 =======================
 Runs every Monday at 9am AEST (11pm UTC Sunday, cron '0 23 * * 0').
-Makes 6 SerpApi calls — 2 queries × 3 nights (Friday, Saturday, Sunday) —
-and posts a pricing table to Slack #growth.
+Makes 3 Booking.com API calls (one per night: Friday, Saturday, Sunday) via
+RapidAPI and posts a pricing table to Slack #growth.
 
-SerpApi budget: 6 calls/week ≈ 24 calls/month.
-Shared budget with competitor_signal.py (≈120/month) ≈ 144/month total.
-Free tier limit: 250/month.
+Single coordinates-based search centred on Hepburn Springs (lat -37.311,
+lng 144.138, 15 km radius) covers both Hepburn Springs and Daylesford.
 
 Environment variables:
-  SERP_API_KEY      — SerpApi key (required)
-  SLACK_WEBHOOK_URL — Slack incoming webhook (required)
+  BOOKING_COM_API_KEY — RapidAPI key for Booking.com Hotels API (required)
+  SLACK_WEBHOOK_URL   — Slack incoming webhook (required)
 """
 
 import logging
@@ -95,14 +94,16 @@ _REF_NAMES = {
     "shizuka":            "Shizuka Ryokan",
 }
 
-SERP_ENDPOINT = "https://serpapi.com/search"
+# Booking.com Hotels API via RapidAPI
+_RAPIDAPI_HOST   = "booking-com15.p.rapidapi.com"
+_SEARCH_ENDPOINT = f"https://{_RAPIDAPI_HOST}/api/v1/hotels/searchHotels"
+_DEST_ENDPOINT   = f"https://{_RAPIDAPI_HOST}/api/v1/hotels/searchDestination"
 
-# Two complementary queries that together cover the full comp set.
-# Q1 captures HSMI + Hepburn-area properties (Mineral Springs, premium refs).
-# Q2 captures Daylesford-area comps (Central, Motor, Frangos, Albert, Royal, Hotel).
-# Merged per night: Q1 takes priority on any duplicate property name.
-_QUERY_HEPBURN    = "Hepburn Springs Victoria accommodation"
-_QUERY_DAYLESFORD = "Daylesford Victoria accommodation motel"
+# Single coordinates search centred on Hepburn Springs.
+# 15 km radius captures both Hepburn Springs and central Daylesford.
+_SEARCH_LAT    = -37.311
+_SEARCH_LNG    = 144.138
+_SEARCH_RADIUS = 15
 
 
 # ---------------------------------------------------------------------------
@@ -142,86 +143,130 @@ def _classify(nl: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# SerpApi query + parsing
+# Booking.com API via RapidAPI
 # ---------------------------------------------------------------------------
 
-def _query_serpapi(api_key: str, q: str, checkin: date) -> dict:
-    """Single SerpApi call for one query string and night. Returns raw JSON."""
+def _booking_headers(api_key: str) -> dict:
+    return {"X-RapidAPI-Key": api_key, "X-RapidAPI-Host": _RAPIDAPI_HOST}
+
+
+def _resolve_dest_id(api_key: str) -> tuple[Optional[str], str]:
+    """Resolve Hepburn Springs / Daylesford region to a Booking.com dest_id."""
+    try:
+        resp = requests.get(
+            _DEST_ENDPOINT,
+            headers=_booking_headers(api_key),
+            params={"query": "Hepburn Springs Daylesford Victoria Australia", "languagecode": "en-us"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("data", [])
+        if results:
+            dest_id   = results[0].get("dest_id")
+            dest_type = results[0].get("dest_type", "city")
+            logger.info("Resolved region → dest_id=%s type=%s", dest_id, dest_type)
+            return dest_id, dest_type
+    except Exception as exc:
+        logger.warning("dest_id resolution failed: %s", exc)
+    return None, "city"
+
+
+def _query_booking_night(
+    api_key: str,
+    checkin: date,
+    dest_id: Optional[str],
+    dest_type: str,
+) -> dict:
+    """Single Booking.com search for one night. Returns raw API response."""
     params = {
-        "engine": "google_hotels",
-        "q": q,
-        "check_in_date": checkin.strftime("%Y-%m-%d"),
-        "check_out_date": (checkin + timedelta(days=1)).strftime("%Y-%m-%d"),
-        "adults": "2",
-        "currency": "AUD",
-        "gl": "au",
-        "hl": "en",
-        "api_key": api_key,
+        "checkin_date":       checkin.strftime("%Y-%m-%d"),
+        "checkout_date":      (checkin + timedelta(days=1)).strftime("%Y-%m-%d"),
+        "adults_number":      "2",
+        "room_number":        "1",
+        "currency_code":      "AUD",
+        "languagecode":       "en-us",
+        "units":              "metric",
+        "page_number":        "0",
+        "filter_by_currency": "AUD",
+        "locale":             "en-gb",
     }
-    logger.info("SerpApi [%s]: %s", q, checkin.strftime("%a %d %b"))
-    resp = requests.get(SERP_ENDPOINT, params=params, timeout=30)
+    if dest_id:
+        params["dest_id"]   = dest_id
+        params["dest_type"] = dest_type
+    else:
+        params["latitude"]  = str(_SEARCH_LAT)
+        params["longitude"] = str(_SEARCH_LNG)
+        params["radius"]    = str(_SEARCH_RADIUS)
+
+    logger.info("Booking.com: %s", checkin.strftime("%a %d %b"))
+    resp = requests.get(
+        _SEARCH_ENDPOINT,
+        headers=_booking_headers(api_key),
+        params=params,
+        timeout=30,
+    )
     resp.raise_for_status()
     return resp.json()
 
 
-def _merge_responses(r1: dict, r2: dict) -> dict:
-    """
-    Merge two SerpApi responses into one synthetic response.
-
-    Properties are deduped by lowercase name; r1 takes priority on conflicts.
-    Each property gains a '_source' field ('Q1' or 'Q2') used for logging.
-    r1's metadata is kept as the base; only 'properties' is replaced.
-    """
-    if "error" in r1:
-        raise ValueError(f"SerpApi error (Q1): {r1['error']}")
-    if "error" in r2:
-        raise ValueError(f"SerpApi error (Q2): {r2['error']}")
-
-    seen: dict[str, dict] = {}
-    for p in r1.get("properties", []):
-        nl = p.get("name", "").lower()
-        if nl not in seen:
-            seen[nl] = {**p, "_source": "Q1"}
-    for p in r2.get("properties", []):
-        nl = p.get("name", "").lower()
-        if nl not in seen:
-            seen[nl] = {**p, "_source": "Q2"}
-
-    return {**r1, "properties": list(seen.values())}
-
-
-def _query_and_merge_night(api_key: str, checkin: date) -> dict:
-    """Run both search queries for one night and return merged properties."""
-    r1 = _query_serpapi(api_key, _QUERY_HEPBURN, checkin)
-    r2 = _query_serpapi(api_key, _QUERY_DAYLESFORD, checkin)
-    return _merge_responses(r1, r2)
-
-
 def _process_night(data: dict) -> dict:
     """
-    Process one night's SerpApi response into a structured result.
+    Process one night's Booking.com API response into a structured result.
+
+    Parses the sold_out_percentage banner (mirrors the "X% of rooms sold in
+    Daylesford" message shown at the top of Booking.com search results).
+    99% sold = SOLD_OUT signal.
 
     Returns:
-      regional_pct / regional_signal / available / total
-      hsmi          — {price_str, price_num, sold} or None
-      pricing_comps — {keyword: {name, price_str, price_num, sold}}
-      reference     — {keyword: {name, price_str, price_num, sold}}
+      regional_pct / regional_sold_pct / regional_signal / available / total
+      sold_out_banner — raw % from Booking.com banner (or None)
+      hsmi            — {price_str, price_num, sold} or None
+      pricing_comps   — {keyword: {name, price_str, price_num, sold}}
+      reference       — {keyword: {name, price_str, price_num, sold}}
       comp_avg / comp_count / hsmi_vs_comp_pct
     """
-    if "error" in data:
-        raise ValueError(f"SerpApi error: {data['error']}")
+    meta = data.get("data", data)
+    if isinstance(meta, dict):
+        search_meta    = meta.get("search_metadata", {})
+        props          = meta.get("hotels", meta.get("properties", []))
+    else:
+        search_meta    = {}
+        props          = meta if isinstance(meta, list) else []
 
-    props = data.get("properties", [])
+    # Booking.com sold-out banner — 99% = SOLD_OUT
+    banner_pct: Optional[float] = None
+    raw_banner = search_meta.get("sold_out_percentage")
+    if raw_banner is not None:
+        try:
+            banner_pct = float(raw_banner)
+            logger.info("  Booking.com banner: %.0f%% sold", banner_pct)
+        except (ValueError, TypeError):
+            pass
+
     total = len(props)
-    sold_out_count = sum(1 for p in props if p.get("is_sold_out"))
-    available = total - sold_out_count
-    regional_pct = round(available / total * 100) if total > 0 else 100
+    sold_out_count = 0
+    for p in props:
+        avail = p.get("available_rooms", p.get("availableRooms"))
+        if (avail is not None and int(avail) == 0) or p.get("soldout") or p.get("is_sold_out"):
+            sold_out_count += 1
 
-    if regional_pct < 1:
+    available = total - sold_out_count
+
+    if banner_pct is not None:
+        sold_pct  = banner_pct
+        avail_pct = round(100 - sold_pct)
+    elif total > 0:
+        avail_pct = round(available / total * 100)
+        sold_pct  = 100 - avail_pct
+    else:
+        avail_pct = 100
+        sold_pct  = 0
+
+    if sold_pct >= 99:
         signal = "SOLD_OUT"
-    elif regional_pct <= 4:
+    elif sold_pct >= 96:
         signal = "CRITICAL"
-    elif regional_pct <= 9:
+    elif sold_pct >= 90:
         signal = "HIGH"
     else:
         signal = "NORMAL"
@@ -231,38 +276,43 @@ def _process_night(data: dict) -> dict:
     reference: dict[str, dict] = {}
 
     for p in props:
-        nl = p.get("name", "").lower()
-        price_raw = p.get("rate_per_night", {})
-        price_raw_str = price_raw.get("lowest") if isinstance(price_raw, dict) else None
-        price_num = _parse_price(price_raw_str)
-        sold = p.get("is_sold_out", False)
+        name = p.get("hotel_name", p.get("name", ""))
+        nl   = name.lower()
+
+        price_raw = (
+            p.get("min_total_price")
+            or p.get("price")
+            or p.get("composite_price_breakdown", {}).get("gross_amount_per_night", {}).get("value")
+        )
+        price_num = _parse_price(price_raw)
+        avail = p.get("available_rooms", p.get("availableRooms"))
+        sold  = (avail is not None and int(avail) == 0) or bool(p.get("soldout") or p.get("is_sold_out"))
         price_str = "SOLD" if sold else (f"${price_num:.0f}" if price_num else "N/A")
 
         category, key = _classify(nl)
-        src = p.get("_source", "?")
         entry = {
-            "name": p.get("name", "?"),
+            "name":      name,
             "price_str": price_str,
             "price_num": None if sold else price_num,
-            "sold": sold,
+            "sold":      sold,
         }
 
         if category == "hsmi":
             hsmi = entry
-            logger.info("  HSMI  [%s]: %s — %s", src, p.get("name"), price_str)
+            logger.info("  HSMI : %s — %s", name, price_str)
         elif category == "pricing_comp":
             pricing_comps[key] = entry
-            logger.info("  COMP  [%s]: %s — %s", src, p.get("name"), price_str)
+            logger.info("  COMP : %s — %s", name, price_str)
         elif category == "reference":
             reference[key] = entry
-            logger.info("  REF   [%s]: %s — %s", src, p.get("name"), price_str)
+            logger.info("  REF  : %s — %s", name, price_str)
         elif category == "skip":
-            logger.debug("  SKIP  [%s]: %s", src, p.get("name"))
+            logger.debug("  SKIP : %s", name)
         else:
-            logger.debug("  other [%s]: %s — %s", src, p.get("name"), price_str)
+            logger.debug("  other: %s — %s", name, price_str)
 
     comp_prices = [v["price_num"] for v in pricing_comps.values() if v["price_num"]]
-    comp_avg = sum(comp_prices) / len(comp_prices) if comp_prices else None
+    comp_avg    = sum(comp_prices) / len(comp_prices) if comp_prices else None
 
     hsmi_price = hsmi["price_num"] if hsmi else None
     hsmi_vs_comp_pct = (
@@ -272,16 +322,18 @@ def _process_night(data: dict) -> dict:
     )
 
     return {
-        "regional_pct":    regional_pct,
-        "regional_signal": signal,
-        "available":       available,
-        "total":           total,
-        "hsmi":            hsmi,
-        "pricing_comps":   pricing_comps,
-        "reference":       reference,
-        "comp_avg":        comp_avg,
-        "comp_count":      len(comp_prices),
-        "hsmi_vs_comp_pct": hsmi_vs_comp_pct,
+        "regional_pct":      avail_pct,
+        "regional_sold_pct": round(sold_pct),
+        "regional_signal":   signal,
+        "sold_out_banner":   banner_pct,
+        "available":         available,
+        "total":             total,
+        "hsmi":              hsmi,
+        "pricing_comps":     pricing_comps,
+        "reference":         reference,
+        "comp_avg":          comp_avg,
+        "comp_count":        len(comp_prices),
+        "hsmi_vs_comp_pct":  hsmi_vs_comp_pct,
     }
 
 
@@ -369,15 +421,16 @@ def _build_message(friday: date, nights: dict) -> str:
     lines.append("```")
     lines.append("")
 
-    # Saturday regional availability signal
+    # Saturday regional availability signal (from Booking.com banner)
     sat_r = nights.get("sat", {})
     if sat_r and "error" not in sat_r:
-        pct  = sat_r.get("regional_pct", "?")
-        sig  = sat_r.get("regional_signal", "?")
-        avail = sat_r.get("available", "?")
-        total = sat_r.get("total", "?")
+        sold_pct    = sat_r.get("regional_sold_pct", "?")
+        sig         = sat_r.get("regional_signal", "?")
+        banner      = sat_r.get("sold_out_banner")
         signal_emoji = {"SOLD_OUT": "🔴", "CRITICAL": "🟠", "HIGH": "🟡", "NORMAL": "🟢"}.get(sig, "⚪")
-        lines.append(f"*Saturday regional:* {avail}/{total} available ({pct}%) — {signal_emoji} {sig}")
+        banner_note  = f" _(Booking.com: {banner:.0f}% sold)_" if banner is not None else ""
+        sold_flag    = " 🔥" if isinstance(sold_pct, (int, float)) and sold_pct >= 99 else ""
+        lines.append(f"*Saturday regional:* {sold_pct}% rooms sold{sold_flag}{banner_note} — {signal_emoji} {sig}")
         lines.append("")
 
     # Premium benchmarks (reference only)
@@ -399,7 +452,7 @@ def _build_message(friday: date, nights: dict) -> str:
         lines.extend(ref_lines)
 
     lines.append("")
-    lines.append("_ℹ️ Rates sourced from Google Hotels search results (Booking.com and other OTA pricing). Direct bookings save guests nothing but save HSMI ~17% commission._")
+    lines.append("_ℹ️ Rates sourced from Booking.com. Direct bookings save guests nothing but save HSMI ~17% commission._")
 
     return "\n".join(lines)
 
@@ -409,10 +462,10 @@ def _build_message(friday: date, nights: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    api_key = os.environ.get("SERP_API_KEY", "").strip()
+    api_key = os.environ.get("BOOKING_COM_API_KEY", "").strip()
     webhook = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 
-    missing = [v for v, k in [("SERP_API_KEY", api_key), ("SLACK_WEBHOOK_URL", webhook)] if not k]
+    missing = [v for v, k in [("BOOKING_COM_API_KEY", api_key), ("SLACK_WEBHOOK_URL", webhook)] if not k]
     if missing:
         logger.critical("Missing required environment variables: %s", ", ".join(missing))
         sys.exit(1)
@@ -420,12 +473,14 @@ def run() -> None:
     today  = datetime.now(_MELB).date()
     friday = _next_friday(today)
     logger.info(
-        "=== HSMI Weekly Comp Report — %s | Weekend: %s/%s/%s ===",
+        "=== HSMI Weekly Comp Report (Booking.com) — %s | Weekend: %s/%s/%s ===",
         today,
         friday,
         friday + timedelta(days=1),
         friday + timedelta(days=2),
     )
+
+    dest_id, dest_type = _resolve_dest_id(api_key)
 
     nights: dict = {}
     for night_key, night_date in [
@@ -435,8 +490,8 @@ def run() -> None:
     ]:
         logger.info("--- %s ---", night_date.strftime("%a %d %b"))
         try:
-            merged = _query_and_merge_night(api_key, night_date)
-            nights[night_key] = _process_night(merged)
+            raw = _query_booking_night(api_key, night_date, dest_id, dest_type)
+            nights[night_key] = _process_night(raw)
         except Exception as exc:
             logger.error("Query failed for %s: %s", night_date, exc)
             nights[night_key] = {"error": str(exc)}

@@ -27,11 +27,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Step 1: query SerpApi (exactly 2 calls), write competitor_cache.json,
+      # Step 1: query Booking.com (via RapidAPI), write competitor_cache.json,
       # post Slack signal summary.
       - name: Run competitor signal
         env:
-          SERP_API_KEY: ${{ secrets.SERP_API_KEY }}
+          BOOKING_COM_API_KEY: ${{ secrets.BOOKING_COM_API_KEY }}
           SLACK_PRICING_WEBHOOK_URL: ${{ secrets.SLACK_PRICING_WEBHOOK_URL }}
           CLOUDBEDS_API_KEY: ${{ secrets.CLOUDBEDS_API_KEY }}
           CLOUDBEDS_PROPERTY_ID: ${{ secrets.CLOUDBEDS_PROPERTY_ID }}

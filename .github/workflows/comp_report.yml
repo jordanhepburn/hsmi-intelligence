@@ -29,6 +29,6 @@ jobs:
 
       - name: Run weekly comp report
         env:
-          SERP_API_KEY: ${{ secrets.SERP_API_KEY }}
+          BOOKING_COM_API_KEY: ${{ secrets.BOOKING_COM_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python reports/comp_report.py
