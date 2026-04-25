@@ -1023,7 +1023,7 @@ async def twiml_inbound():
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response>"
         "<Dial>"
-        "<Sip>sip:+61343279502@sip.retellai.com;transport=tcp</Sip>"
+        "<Sip>sip:+61340631318@sip.retellai.com;transport=tcp</Sip>"
         "</Dial>"
         "</Response>"
     )
