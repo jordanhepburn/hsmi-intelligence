@@ -82,8 +82,9 @@ _STATUS_EMOJI = {
     "VACANT":   "⚪",
 }
 
-# frontdeskStatus values Cloudbeds uses for in-house (occupied) rooms
-_INHOUSE_FD_STATUSES = {"in-house", "inhouse", "occupied", "stay", "stayover"}
+# frontdeskStatus values Cloudbeds uses for turnovers and in-house (stayover) rooms
+_TURNOVER_FD_STATUSES = {"turnover"}
+_INHOUSE_FD_STATUSES  = {"in-house", "inhouse", "occupied", "stay", "stayover"}
 
 # ---------------------------------------------------------------------------
 # Special keywords to scan for in reservation notes
@@ -185,6 +186,32 @@ class HousekeepingReport:
             list(room_id_to_checkin.keys()),
         )
 
+        # Step 2a: Get today's check-out reservations so we can detect turnovers
+        # when Cloudbeds reports fd_status="check-in" but a different guest is
+        # also departing the same room today.
+        logger.info("Fetching check-out reservations today")
+        checkout_ids = self._fetch_res_ids(checkOutFrom=today_str, checkOutTo=today_str)
+        # Remove any that are also checking IN today (already in checkin_ids)
+        checkout_ids -= checkin_ids
+        logger.info("Checkouts today (excl. same-res arrivals): %d", len(checkout_ids))
+
+        room_id_to_checkout: set[str] = set()
+        for res_id in checkout_ids:
+            d = self._fetch_detail(res_id)
+            if not d:
+                continue
+            for assignment in (d.get("rooms") or d.get("assigned") or []):
+                if isinstance(assignment, dict):
+                    rid = str(
+                        assignment.get("roomID") or
+                        assignment.get("physicalRoomID") or ""
+                    )
+                    if rid:
+                        room_id_to_checkout.add(rid)
+        logger.info(
+            "Checkout room assignments resolved: %d rooms", len(room_id_to_checkout)
+        )
+
         # Step 2b: Fetch in-house reservations (checked in before today, checking
         # out tomorrow or later) so we can detect stayovers and calculate nights.
         yesterday_str  = (self.today - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -236,14 +263,20 @@ class HousekeepingReport:
                     checkin_detail is not None,
                 )
 
-            # Determine status — checkin_detail (guest arriving today) takes
-            # priority over condition so a dirty room with an incoming guest
-            # shows as TURNOVER/CHECKIN rather than DIRTY.
+            # Determine status.
+            # Cloudbeds can return fd_status="turnover" or "stayover" directly —
+            # handle those first, then fall back to the check-in/check-out logic
+            # for cases where it gives us those individual signals instead.
             inhouse_detail = room_id_to_inhouse.get(room_id)
-            if fd_status == "check-out" and checkin_detail:
+            has_checkout   = room_id in room_id_to_checkout
+            if fd_status in _TURNOVER_FD_STATUSES:
+                status = "TURNOVER"
+            elif fd_status == "check-out" and checkin_detail:
                 status = "TURNOVER"
             elif fd_status == "check-out":
                 status = "CHECKOUT"
+            elif fd_status == "check-in" and has_checkout:
+                status = "TURNOVER"   # outgoing + incoming same room = turnover
             elif fd_status == "check-in":
                 status = "CHECKIN"
             elif checkin_detail and condition == "dirty":
