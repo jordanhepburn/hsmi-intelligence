@@ -5,9 +5,8 @@ Creates or updates all HSMI scheduled jobs in cron-job.org via their REST API.
 Idempotent — safe to run repeatedly.
 
 Existing jobs are matched by title. If a job with the same title exists it is
-updated (PATCH); otherwise it is created (PUT).
-
-The pricing engine job (ID 7516426) is always updated by ID, never duplicated.
+updated (PATCH); otherwise it is created (PUT). 500 errors on PATCH are skipped
+with a warning so new jobs still get created.
 
 Environment variables:
   CRONJOB_API_KEY — cron-job.org API key (required)
@@ -20,6 +19,7 @@ Usage:
 import logging
 import os
 import sys
+import time
 
 import requests
 
@@ -115,17 +115,25 @@ def _list_jobs(api_key: str) -> list[dict]:
     return resp.json().get("jobs", [])
 
 
-def _update_job(api_key: str, job_id: int, job: dict) -> None:
+def _update_job(api_key: str, job_id: int, job: dict) -> bool:
+    """Returns True on success, False on 500 (skip gracefully)."""
     resp = requests.patch(
         f"{API_BASE}/jobs/{job_id}",
         headers=_headers(api_key),
         json={"job": job},
         timeout=15,
     )
+    if resp.status_code == 500:
+        logger.warning(
+            "PATCH /jobs/%s returned 500 — skipping update for '%s' (body: %s)",
+            job_id, job["title"], resp.text[:200] or "<empty>",
+        )
+        return False
     if not resp.ok:
         logger.error("PATCH /jobs/%s → %s: %s", job_id, resp.status_code, resp.text[:500])
-    resp.raise_for_status()
+        resp.raise_for_status()
     logger.info("Updated job %d: %s", job_id, job["title"])
+    return True
 
 
 def _create_job(api_key: str, job: dict) -> int:
@@ -164,7 +172,9 @@ def main() -> None:
     logger.info("Found %d existing jobs", len(existing))
 
     errors = 0
-    for job in jobs:
+    for i, job in enumerate(jobs):
+        if i > 0:
+            time.sleep(2)  # avoid 429 rate limiting
         title  = job["title"]
         job_id = existing_by_title.get(title)
         try:
