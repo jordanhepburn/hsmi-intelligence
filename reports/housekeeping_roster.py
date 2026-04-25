@@ -185,18 +185,21 @@ class HousekeepingRoster:
 
             # Roster string for display
             roster_parts = []
-            if dwayne_hrs: roster_parts.append(f"Dwayne {dwayne_hrs}h")
-            if lisa_hrs:   roster_parts.append(f"Lisa {lisa_hrs}h")
-            if jodie_hrs:  roster_parts.append(f"Jodie {jodie_hrs}h")
-            roster_str = ", ".join(roster_parts) if roster_parts else "No staff rostered"
+            if dwayne_hrs: roster_parts.append(f"D {dwayne_hrs}h")
+            if lisa_hrs:   roster_parts.append(f"L {lisa_hrs}h")
+            if jodie_hrs:  roster_parts.append(f"J {jodie_hrs}h")
+            roster_str = " · ".join(roster_parts) if roster_parts else "No staff rostered"
+
+            _to = lambda n: f"{n} turnover{'s' if n != 1 else ''}"
+            _co = lambda n: f"{n} checkout{'s' if n != 1 else ''}"
 
             if dow in (2, 3):  # Wednesday / Thursday — Jodie only, D+L off
                 if n_to > max_to:
-                    flag = f"🚨 Jodie only — arrange casuals ({n_to} turnovers, cap {max_to})"
+                    flag = f"🚨 Jodie only — arrange casuals ({_to(n_to)}, cap {max_to})"
                 elif n_to > 0:
-                    flag = f"✅ Jodie: {n_to} turnovers + {n_co} checkouts"
+                    flag = f"✅ Jodie: {_to(n_to)} + {_co(n_co)}"
                 elif n_co > 0:
-                    flag = f"✅ Jodie: {n_co} checkouts"
+                    flag = f"✅ Jodie: {_co(n_co)}"
                 else:
                     flag = "✅ quiet"
 
@@ -204,9 +207,9 @@ class HousekeepingRoster:
                 rooms_cleaned      = min(total_available, total_hrs)
                 dwayne_maintenance = max(0, dwayne_hrs - max(0, rooms_cleaned - lisa_hrs - jodie_hrs))
                 if n_to > max_to:
-                    flag = f"🚨 ARRANGE CASUALS — {n_to} turnovers (cap {max_to})"
+                    flag = f"🚨 ARRANGE CASUALS — {_to(n_to)} (cap {max_to})"
                 else:
-                    maint_note = f" | Dwayne: {dwayne_maintenance}h maintenance" if dwayne_maintenance > 0 else ""
+                    maint_note = f" | 🔧 Dwayne {dwayne_maintenance}h maint." if dwayne_maintenance > 0 else ""
                     flag = f"✅ clean {rooms_cleaned}{maint_note}"
 
             elif dow == 6:  # Sunday — Lisa cleans to full capacity, Dwayne on maintenance
@@ -216,10 +219,10 @@ class HousekeepingRoster:
                 must_clean         = lisa_can_clean
                 sunday_deferrals   = max(0, total_available - must_clean)
                 if n_to > max_to:
-                    flag = f"🚨 consider casuals — {n_to} turnovers (cap {max_to}, high pay day)"
+                    flag = f"🚨 consider casuals — {_to(n_to)} (cap {max_to}, high pay day)"
                 else:
                     defer_note = f" | defer {sunday_deferrals} to Mon" if sunday_deferrals > 0 else ""
-                    maint_note = f" | Dwayne: {dwayne_maintenance}h maintenance" if dwayne_maintenance > 0 else ""
+                    maint_note = f" | 🔧 Dwayne {dwayne_maintenance}h maint." if dwayne_maintenance > 0 else ""
                     flag = f"✅ Lisa cleans {must_clean}{defer_note}{maint_note}"
 
             elif dow == 0:  # Monday — D+L+Jodie, absorbs Sunday deferrals
@@ -230,11 +233,11 @@ class HousekeepingRoster:
                 sunday_deferrals   = 0
                 dwayne_maintenance = max(0, dwayne_hrs - max(0, rooms_cleaned - lisa_hrs - jodie_hrs))
                 if n_to > max_to:
-                    flag = f"🚨 arrange casuals — {n_to} turnovers{sun_note} (cap {max_to})"
+                    flag = f"🚨 arrange casuals — {_to(n_to)}{sun_note} (cap {max_to})"
                 elif deferred_mon > 0:
                     flag = f"⚠️  {deferred_mon} rooms carry to Tue | clean {rooms_cleaned}{sun_note}"
                 else:
-                    maint_note = f" | Dwayne: {dwayne_maintenance}h maintenance" if dwayne_maintenance > 0 else ""
+                    maint_note = f" | 🔧 Dwayne {dwayne_maintenance}h maint." if dwayne_maintenance > 0 else ""
                     flag = f"✅ clean {rooms_cleaned}{sun_note}{maint_note}"
 
             else:  # Tuesday and Friday
@@ -242,11 +245,11 @@ class HousekeepingRoster:
                 deferred           = max(0, total_available - rooms_cleaned)
                 dwayne_maintenance = max(0, dwayne_hrs - max(0, rooms_cleaned - lisa_hrs))
                 if n_to > max_to:
-                    flag = f"🚨 arrange casuals — {n_to} turnovers (cap {max_to})"
+                    flag = f"🚨 arrange casuals — {_to(n_to)} (cap {max_to})"
                 elif deferred > 0:
                     flag = f"✅ clean {rooms_cleaned} | defer {deferred}"
                 else:
-                    maint_note = f" | Dwayne: {dwayne_maintenance}h maintenance" if dwayne_maintenance > 0 else ""
+                    maint_note = f" | 🔧 Dwayne {dwayne_maintenance}h maint." if dwayne_maintenance > 0 else ""
                     flag = f"✅ clean {rooms_cleaned}{maint_note}" if rooms_cleaned > 0 else "✅ quiet"
 
             rows.append({"date": d, "n_to": n_to, "n_co": n_co, "roster": roster_str, "flag": flag})
@@ -319,9 +322,12 @@ class HousekeepingRoster:
 
         for r in rows:
             date_label = r["date"].strftime("%a %d %b")
+            n_to, n_co = r["n_to"], r["n_co"]
+            to_str = f"{n_to} turnover{'s' if n_to != 1 else ''}"
+            co_str = f"{n_co} checkout{'s' if n_co != 1 else ''}"
             lines.append("")
-            lines.append(f"📅 *{date_label}* — {r['roster']}")
-            lines.append(f"   {r['n_to']} turnovers · {r['n_co']} checkouts · {r['flag']}")
+            lines.append(f"*{date_label}* — {r['roster']}")
+            lines.append(f"   {to_str} · {co_str} · {r['flag']}")
 
         lines += [
             "",
