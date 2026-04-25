@@ -9,6 +9,7 @@ Room statuses (derived from getHousekeepingStatus):
   🟠 CHECKOUT  — check-out today, no new arrival (full clean for departure)
   🟡 DIRTY     — vacant but dirty (shows "dirty since <day>")
   🟢 CHECKIN   — guest arriving, room already clean
+  🔵 STAYOVER  — in-house guest, no action needed (3+ nights: note to check towels etc)
   ⚪ VACANT    — empty and clean, no action needed
 
 Rows are sorted by priority (🔴 first, ⚪ last) so Dwayne scans top-to-bottom
@@ -24,7 +25,7 @@ import logging
 import os
 import re
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
 
@@ -68,7 +69,8 @@ _STATUS_PRIORITY = {
     "CHECKOUT": 2,
     "DIRTY":    3,
     "CHECKIN":  4,
-    "VACANT":   5,
+    "STAYOVER": 5,
+    "VACANT":   6,
 }
 
 _STATUS_EMOJI = {
@@ -76,8 +78,12 @@ _STATUS_EMOJI = {
     "CHECKOUT": "🟠",
     "DIRTY":    "🟡",
     "CHECKIN":  "🟢",
+    "STAYOVER": "🔵",
     "VACANT":   "⚪",
 }
+
+# frontdeskStatus values Cloudbeds uses for in-house (occupied) rooms
+_INHOUSE_FD_STATUSES = {"in-house", "inhouse", "occupied", "stay", "stayover"}
 
 # ---------------------------------------------------------------------------
 # Special keywords to scan for in reservation notes
@@ -179,6 +185,30 @@ class HousekeepingReport:
             list(room_id_to_checkin.keys()),
         )
 
+        # Step 2b: Fetch in-house reservations (checked in before today, checking
+        # out tomorrow or later) so we can detect stayovers and calculate nights.
+        yesterday_str  = (self.today - timedelta(days=1)).strftime("%Y-%m-%d")
+        tomorrow_str   = (self.today + timedelta(days=1)).strftime("%Y-%m-%d")
+        inhouse_ids = self._fetch_res_ids(checkInTo=yesterday_str, checkOutFrom=tomorrow_str)
+        logger.info("In-house reservations: %d", len(inhouse_ids))
+
+        room_id_to_inhouse: dict[str, dict] = {}
+        for res_id in inhouse_ids:
+            d = self._fetch_detail(res_id)
+            if not d:
+                continue
+            for assignment in (d.get("rooms") or d.get("assigned") or []):
+                if isinstance(assignment, dict):
+                    rid = str(
+                        assignment.get("roomID") or
+                        assignment.get("physicalRoomID") or ""
+                    )
+                    if rid:
+                        room_id_to_inhouse[rid] = d
+        logger.info(
+            "Inhouse room assignments resolved: %d rooms", len(room_id_to_inhouse)
+        )
+
         # Step 3: Derive status for each room and build row data
         rows: list[dict] = []
         for room in hs_rooms:
@@ -209,6 +239,7 @@ class HousekeepingReport:
             # Determine status — checkin_detail (guest arriving today) takes
             # priority over condition so a dirty room with an incoming guest
             # shows as TURNOVER/CHECKIN rather than DIRTY.
+            inhouse_detail = room_id_to_inhouse.get(room_id)
             if fd_status == "check-out" and checkin_detail:
                 status = "TURNOVER"
             elif fd_status == "check-out":
@@ -221,6 +252,8 @@ class HousekeepingReport:
                 status = "CHECKIN"    # guest arriving, room clean
             elif condition == "dirty":
                 status = "DIRTY"
+            elif fd_status in _INHOUSE_FD_STATUSES or inhouse_detail:
+                status = "STAYOVER"
             else:
                 status = "VACANT"
 
@@ -231,6 +264,24 @@ class HousekeepingReport:
                 notes_text = checkin_detail.get("_raw_notes", "")
                 # Keyword extraction for the Special Notes section
                 keywords = _extract_keywords(notes_text) or self._keywords_for(checkin_detail)
+            elif status == "STAYOVER" and inhouse_detail:
+                arriving_guest = "-"
+                notes_text = ""
+                keywords = []
+                # Calculate nights stayed; flag long-stay rooms for HK attention
+                checkin_raw = (
+                    inhouse_detail.get("checkIn") or
+                    inhouse_detail.get("startDate") or
+                    inhouse_detail.get("checkInDate") or ""
+                )
+                if checkin_raw:
+                    try:
+                        checkin_dt = date.fromisoformat(str(checkin_raw)[:10])
+                        nights = (self.today - checkin_dt).days
+                        if nights >= 3:
+                            notes_text = f"In-house {nights} nights, may need fresh towels etc"
+                    except (ValueError, TypeError):
+                        pass
             else:
                 arriving_guest = "-"
                 notes_text = ""
@@ -425,7 +476,7 @@ class HousekeepingReport:
             f"Notes"
         )
 
-        n_turnovers = n_checkouts = n_dirty = n_checkins = n_vacant = 0
+        n_turnovers = n_checkouts = n_dirty = n_checkins = n_stayovers = n_vacant = 0
         special_notes: list[str] = []
         table_rows: list[str] = []
 
@@ -439,6 +490,7 @@ class HousekeepingReport:
             elif status == "CHECKOUT": n_checkouts += 1
             elif status == "DIRTY": n_dirty += 1
             elif status == "CHECKIN": n_checkins += 1
+            elif status == "STAYOVER": n_stayovers += 1
             else: n_vacant += 1
 
             # Status display — DIRTY shows how long it's been dirty
@@ -470,6 +522,7 @@ class HousekeepingReport:
             f" | {n_checkouts} checkout{'s' if n_checkouts != 1 else ''}"
             f" | {n_dirty} dirty"
             f" | {n_checkins} checkin{'s' if n_checkins != 1 else ''}"
+            f" | {n_stayovers} stayover{'s' if n_stayovers != 1 else ''}"
             f" | {n_vacant} vacant_"
         )
 
