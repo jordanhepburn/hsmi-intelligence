@@ -123,7 +123,7 @@ def _list_jobs(api_key: str) -> list[dict]:
 
 def _update_job(api_key: str, job_id: int, job: dict) -> None:
     resp = requests.patch(
-        f"{API_BASE}/job/{job_id}",
+        f"{API_BASE}/jobs/{job_id}",
         headers=_headers(api_key),
         json={"job": job},
         timeout=15,
@@ -134,7 +134,7 @@ def _update_job(api_key: str, job_id: int, job: dict) -> None:
 
 def _create_job(api_key: str, job: dict) -> int:
     resp = requests.put(
-        f"{API_BASE}/job",
+        f"{API_BASE}/jobs",
         headers=_headers(api_key),
         json={"job": job},
         timeout=15,
