@@ -313,13 +313,15 @@ async def check_availability(request: Request):
         for code, cfg in ROOM_TYPE_ID_MAP.items():
             if room_filter and code != room_filter:
                 continue
-            rt_id    = cfg["id"]
+            rt_id     = cfg["id"]
             avail_rec = avail_by_id.get(rt_id)
-            if avail_rec is None or avail_rec["qty"] < 1:
+            qty       = avail_rec["qty"] if avail_rec else 0
+            if qty < 1:
+                logger.info("check_availability: %s excluded (qty=%d)", code, qty)
                 continue
 
             # roomRate is the total stay cost — divide by nights to get nightly average
-            total = avail_rec["rate"]
+            total   = avail_rec["rate"]
             nightly = round(total / nights) if total and nights > 0 else None
             available.append({
                 "code": code,
@@ -327,9 +329,17 @@ async def check_availability(request: Request):
                 "rate": nightly,
             })
 
+        logger.info(
+            "check_availability: %s→%s — %d/%d room types available",
+            checkin_str, checkout_str, len(available), len(ROOM_TYPE_ID_MAP),
+        )
+
         if not available:
             return JSONResponse({
-                "result": "Unfortunately we are fully booked for those dates."
+                "result": (
+                    f"Unfortunately we're fully booked from {_fmt_date(checkin)} "
+                    f"to {_fmt_date(checkout)}. Can I help you with different dates?"
+                )
             })
 
         nights_word = "night" if nights == 1 else "nights"
@@ -345,9 +355,10 @@ async def check_availability(request: Request):
 
         return JSONResponse({
             "result": (
-                f"Great news! For {_fmt_date(checkin)} to {_fmt_date(checkout)} "
-                f"— {nights} {nights_word} — we have: {rooms_list}. "
-                f"Would you like me to hold a room for you?"
+                f"We have availability for {_fmt_date(checkin)} to {_fmt_date(checkout)} "
+                f"— {nights} {nights_word}. "
+                f"The rooms available are: {rooms_list}. "
+                f"Would you like me to hold one for you?"
             )
         })
 
