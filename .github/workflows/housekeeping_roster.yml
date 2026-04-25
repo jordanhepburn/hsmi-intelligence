@@ -2,8 +2,8 @@ name: HSMI Housekeeping Roster
 
 on:
   schedule:
-    # 8:00 am AEST = 22:00 UTC
-    - cron: '0 22 * * *'
+    # 2:00 pm AEST = 04:00 UTC
+    - cron: '0 4 * * *'
   workflow_dispatch:
 
 env:

@@ -2,8 +2,8 @@ name: HSMI Competitor Signal + Rate Push
 
 on:
   schedule:
-    # 9:00 am AEST = 23:00 UTC (previous day)
-    - cron: '0 23 * * *'
+    # 2:00 pm AEST = 04:00 UTC
+    - cron: '0 4 * * *'
   workflow_dispatch:
     # Allows manual trigger from the GitHub Actions UI
 

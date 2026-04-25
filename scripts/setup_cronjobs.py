@@ -87,14 +87,14 @@ def build_jobs(cron_secret: str) -> list[dict]:
         _make_job(
             title="HSMI HK Roster",
             path="/cron/housekeeping-roster",
-            hours=[22],   # 22:00 UTC = 8:00 AEST
+            hours=[4],    # 04:00 UTC = 2:00pm AEST
             minutes=[0],
             cron_secret=cron_secret,
         ),
         _make_job(
             title="HSMI Competitor Signal",
             path="/cron/competitor-signal",
-            hours=[23],   # 23:00 UTC = 9:00 AEST
+            hours=[4],    # 04:00 UTC = 2:00pm AEST
             minutes=[0],
             cron_secret=cron_secret,
         ),
