@@ -15,9 +15,9 @@ Staffing (rostered hours = 1hr per room):
   Total:  Mon 12 | Tue 4 | Wed/Thu 0 (D+L off) | Fri 10 | Sat/Sun 12
 
 Environment variables:
-  CLOUDBEDS_API_KEY              — Cloudbeds API key (required)
-  CLOUDBEDS_PROPERTY_ID          — Cloudbeds property ID (required)
-  SLACK_OPERATIONS_WEBHOOK_URL   — Slack #operations incoming webhook (required)
+  CLOUDBEDS_API_KEY            — Cloudbeds API key (required)
+  CLOUDBEDS_PROPERTY_ID        — Cloudbeds property ID (required)
+  SLACK_PRICING_WEBHOOK_URL    — Slack #api-pricing-engine incoming webhook (required)
 """
 
 import logging
@@ -92,9 +92,9 @@ class HousekeepingRoster:
             sys.exit(1)
 
         self.client  = CloudbedsClient(api_key=api_key, property_id=property_id)
-        self.webhook = os.environ.get("SLACK_OPERATIONS_WEBHOOK_URL", "").strip()
+        self.webhook = os.environ.get("SLACK_PRICING_WEBHOOK_URL", "").strip()
         if not self.webhook:
-            logger.warning("SLACK_OPERATIONS_WEBHOOK_URL not set — report will print to stdout only")
+            logger.warning("SLACK_PRICING_WEBHOOK_URL not set — report will print to stdout only")
 
         now = datetime.now(ZoneInfo("Australia/Melbourne"))
         self.today = now.date()
