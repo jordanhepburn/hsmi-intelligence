@@ -186,7 +186,7 @@ def _query_booking_night(
         "currency_code":      "AUD",
         "languagecode":       "en-us",
         "units":              "metric",
-        "page_number":        "0",
+        "page_number":        "1",
         "filter_by_currency": "AUD",
         "locale":             "en-gb",
         "search_type":        "CITY",
