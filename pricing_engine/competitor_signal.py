@@ -115,15 +115,14 @@ _SKIP_ALIASES = ["wyndham", "albert motel"]
 
 def _target_dates(today: date) -> tuple[date, date]:
     """
-    Return (date1, date2) for the coming weekend.
-    Normal: upcoming Friday + Saturday of same weekend.
-    If today IS Friday: Friday = today.
-    If today IS Saturday: today + next Friday (next weekend).
+    Return (friday, saturday) for the coming weekend.
+    Always looks at least 1 day ahead so we never query same-day check-in.
     """
-    weekday = today.weekday()  # Mon=0 … Sat=5, Sun=6
-    if weekday == 5:
-        return today, today + timedelta(days=6)
+    weekday = today.weekday()  # Mon=0 … Sun=6
+    # Days until the next Friday strictly in the future (≥1 day away)
     days_to_fri = (4 - weekday) % 7
+    if days_to_fri == 0:
+        days_to_fri = 7  # today IS Friday → next Friday
     friday = today + timedelta(days=days_to_fri)
     return friday, friday + timedelta(days=1)
 
