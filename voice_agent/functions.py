@@ -250,53 +250,57 @@ async def health():
 @app.get("/test/hold_room")
 async def test_hold_room():
     """
-    Diagnostic endpoint — fires a dry-run hold_room with test data and returns
-    the raw Cloudbeds response. Does NOT post to Slack.
+    Diagnostic endpoint — places a real room block for a TWI room 60 days out,
+    then immediately deletes it. Confirms the full postRoomBlock flow works.
+    Does NOT post to Slack.
     GET https://<railway-url>/test/hold_room
     """
     from datetime import date, timedelta
-    from config import BASE_RATE_IDS
-    from cloudbeds_client import CloudbedsClient
 
-    api_key = (
-        os.environ.get("CHERRY_CLOUDBEDS_API_KEY", "").strip()
-        or os.environ.get("CLOUDBEDS_API_KEY", "")
-    )
-    property_id = os.environ.get("CLOUDBEDS_PROPERTY_ID", "")
-
-    checkin  = (date.today() + timedelta(days=30)).isoformat()
-    checkout = (date.today() + timedelta(days=31)).isoformat()
+    checkin  = (date.today() + timedelta(days=60)).isoformat()
+    checkout = (date.today() + timedelta(days=61)).isoformat()
     room_code = "TWI"
-    cfg = ROOM_TYPE_ID_MAP[room_code]
-
-    payload = {
-        "startDate":             checkin,
-        "endDate":               checkout,
-        "guestFirstName":        "Test",
-        "guestLastName":         "Cherry",
-        "guestEmail":            "",
-        "guestPhone":            "0400000000",
-        "guestCountry":          "AU",
-        "paymentMethod":         "cc",
-        "rooms[0][roomTypeID]":  cfg["id"],
-        "rooms[0][rateID]":      BASE_RATE_IDS[room_code],
-        "rooms[0][quantity]":    "1",
-        "adults[0][roomTypeID]": cfg["id"],
-        "adults[0][quantity]":   "1",
-        "adults[0][adults]":     "1",
-        "children[0][roomTypeID]": cfg["id"],
-        "children[0][quantity]": "1",
-        "children[0][children]": "0",
-        "sendEmailConfirmation": "false",
-        "estimatedArrivalTime":  "15:00",
-    }
+    cfg       = ROOM_TYPE_ID_MAP[room_code]
+    type_id   = cfg["id"]
 
     try:
-        client = CloudbedsClient(api_key=api_key, property_id=property_id)
-        resp   = client._request("POST", "postReservation", data=payload)
-        return {"payload_sent": payload, "cloudbeds_response": resp}
+        client    = _cb()
+        rooms_resp = client._get("getRooms")
+        all_rooms  = rooms_resp.get("data", [{}])[0].get("rooms", [])
+        type_rooms = [r for r in all_rooms if r.get("roomTypeID") == type_id and not r.get("isVirtual")]
+
+        block_result = None
+        block_id     = None
+        for room in type_rooms:
+            rid  = room.get("roomID", "")
+            resp = client._request("POST", "postRoomBlock", data={
+                "startDate":        checkin,
+                "endDate":          checkout,
+                "roomBlockReason":  "Cherry TEST — auto-deleted",
+                "roomBlockType":    "out_of_service",
+                "rooms[0][roomID]": rid,
+            })
+            if resp.get("success"):
+                block_id     = str(resp.get("roomBlockID", ""))
+                block_result = {"blocked_room": room.get("roomName"), "blockID": block_id, "response": resp}
+                break
+            else:
+                block_result = {"tried": rid, "skipped": resp.get("message")}
+
+        # Clean up immediately
+        delete_result = None
+        if block_id:
+            del_resp = client._session.post(
+                "https://api.cloudbeds.com/api/v1.3/deleteRoomBlock",
+                params={"propertyID": os.environ.get("CLOUDBEDS_PROPERTY_ID", "")},
+                data={"roomBlockID": block_id},
+            )
+            delete_result = del_resp.json()
+
+        return {"checkin": checkin, "checkout": checkout, "block": block_result, "delete": delete_result}
+
     except Exception as exc:
-        return {"payload_sent": payload, "error": str(exc)}
+        return {"error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +529,7 @@ async def get_rate_breakdown(request: Request):
 
 @app.post("/functions/hold_room")
 async def hold_room(request: Request):
-    body = _args(await request.json())
+    body         = _args(await request.json())
     checkin_str  = str(body.get("checkin_date", "") or "")
     checkout_str = str(body.get("checkout_date", "") or "")
     room_code    = str(body.get("room_type_code", "") or body.get("room_type", "") or "").upper().strip()
@@ -534,78 +538,71 @@ async def hold_room(request: Request):
     guest_email  = str(body.get("guest_email", "") or "")
     num_guests   = str(body.get("num_guests", "1") or "1")
 
-    # Split guest name into first/last for Cloudbeds
-    name_parts   = guest_name.strip().split()
-    first_name   = name_parts[0] if name_parts else "Guest"
-    last_name    = " ".join(name_parts[1:]) if len(name_parts) > 1 else "."
-
-    # Resolve code to friendly room name and Cloudbeds IDs
     cfg        = ROOM_TYPE_ID_MAP.get(room_code, {})
     room_label = cfg.get("name") or room_code or "not specified"
+    type_id    = cfg.get("id", "")
 
     # -----------------------------------------------------------------------
-    # Step 1: Create reservation in Cloudbeds via postReservation
-    # API requires form-encoded (not JSON). Correct payload structure confirmed
-    # via probing. If Cloudbeds returns "could not accommodate", the property
-    # likely needs to enable API-based booking in its channel settings.
+    # Step 1: Block a room in Cloudbeds via postRoomBlock.
+    # Finds the first available room of the requested type and places an
+    # out_of_service block so it can't be double-booked while Veronica
+    # creates the full reservation and takes payment.
+    # Confirmed working via API discovery 25 Apr 2026.
     # -----------------------------------------------------------------------
-    reservation_id: str | None = None
+    block_id:   str | None = None
+    blocked_room_name: str | None = None
     cb_status = "not attempted"
 
     if room_code and room_code in ROOM_TYPE_ID_MAP:
         try:
-            from config import BASE_RATE_IDS
-            adults_count = max(int(num_guests), 1)
-            room_type_id = cfg["id"]
-            rate_id      = BASE_RATE_IDS.get(room_code, "")
-            property_id  = os.environ.get("CLOUDBEDS_PROPERTY_ID", "").strip()
-
-            # Payload must be form-encoded (data=), not JSON.
-            # propertyID is intentionally omitted — _request() adds it to query params.
-            # sourceID is omitted — "s-3-1" caused "channel not enabled" errors.
-            payload = {
-                "startDate":                checkin_str,
-                "endDate":                  checkout_str,
-                "guestFirstName":           first_name,
-                "guestLastName":            last_name,
-                "guestEmail":               guest_email or "",
-                "guestPhone":               guest_phone or "",
-                "guestCountry":             "AU",
-                "paymentMethod":            "cc",
-                "rooms[0][roomTypeID]":     room_type_id,
-                "rooms[0][rateID]":         rate_id,
-                "rooms[0][quantity]":       "1",
-                "adults[0][roomTypeID]":    room_type_id,
-                "adults[0][quantity]":      "1",
-                "adults[0][adults]":        str(adults_count),
-                "children[0][roomTypeID]":  room_type_id,
-                "children[0][quantity]":    "1",
-                "children[0][children]":    "0",
-                "sendEmailConfirmation":    "false",
-                "estimatedArrivalTime":     "15:00",
-            }
-            logger.info("postReservation payload: %s", payload)
             client = _cb()
-            resp   = client._request("POST", "postReservation", data=payload)
-            logger.info("postReservation response: %s", resp)
 
-            if resp.get("success"):
-                reservation_id = str(
-                    resp.get("reservationID") or
-                    resp.get("data", {}).get("reservationID") or ""
-                )
-                cb_status = f"created — reservationID {reservation_id}"
-                logger.info("Reservation created: %s", reservation_id)
-            else:
-                cb_status = f"failed — {resp.get('message', 'unknown error')}"
-                logger.warning("postReservation failed: %s", resp)
+            # Get all rooms for this property and filter to the requested type
+            rooms_resp = client._get("getRooms")
+            all_rooms  = rooms_resp.get("data", [{}])[0].get("rooms", [])
+            type_rooms = [
+                r for r in all_rooms
+                if r.get("roomTypeID") == type_id and not r.get("isVirtual")
+            ]
+
+            # Try each room until one blocks successfully (others may be occupied)
+            block_reason = (
+                f"Cherry hold — {guest_name} "
+                f"({checkin_str} to {checkout_str}, {num_guests} guest(s)). "
+                f"Phone: {guest_phone or 'not provided'}. "
+                "Veronica to confirm + take payment."
+            )
+            for room in type_rooms:
+                rid = room.get("roomID", "")
+                try:
+                    resp = client._request("POST", "postRoomBlock", data={
+                        "startDate":        checkin_str,
+                        "endDate":          checkout_str,
+                        "roomBlockReason":  block_reason,
+                        "roomBlockType":    "out_of_service",
+                        "rooms[0][roomID]": rid,
+                    })
+                    if resp.get("success"):
+                        block_id          = str(resp.get("roomBlockID", ""))
+                        blocked_room_name = room.get("roomName", rid)
+                        cb_status         = f"blocked — {blocked_room_name} (blockID {block_id})"
+                        logger.info("Room blocked: %s blockID=%s", blocked_room_name, block_id)
+                        break
+                    else:
+                        logger.debug("postRoomBlock skipped %s: %s", rid, resp.get("message"))
+                except Exception as exc:
+                    logger.debug("postRoomBlock failed for %s: %s", rid, exc)
+
+            if not block_id:
+                cb_status = "no room available to block for those dates"
+                logger.warning("hold_room: could not block any %s room for %s–%s", room_code, checkin_str, checkout_str)
 
         except Exception as exc:
             cb_status = f"error — {exc}"
-            logger.error("postReservation exception: %s", exc)
+            logger.error("hold_room block error: %s", exc)
     else:
         cb_status = "skipped — unknown room type"
-        logger.warning("hold_room: unknown room_code '%s', skipping postReservation", room_code)
+        logger.warning("hold_room: unknown room_code '%s'", room_code)
 
     # -----------------------------------------------------------------------
     # Step 2: Notify Slack #api-phone-calls
@@ -613,12 +610,12 @@ async def hold_room(request: Request):
     veronica_id = os.environ.get("VERONICA_SLACK_ID", "").strip()
     tag         = f"<@{veronica_id}> " if veronica_id else ""
 
-    if reservation_id:
-        res_line = f"*Reservation ID:* {reservation_id} ✅ Created in Cloudbeds"
-        action   = "Call guest to confirm and take payment"
+    if block_id:
+        cb_line = f"*Room blocked:* {blocked_room_name} ✅ (blockID: {block_id})"
+        action  = "Create reservation in Cloudbeds, then call guest to take payment"
     else:
-        res_line = f"*Cloudbeds:* {cb_status} ⚠️ Create reservation manually"
-        action   = "1. Create reservation in Cloudbeds NOW  2. Call guest to take payment"
+        cb_line = f"*Cloudbeds:* {cb_status} ⚠️"
+        action  = "1. Check availability + create reservation manually  2. Call guest to take payment"
 
     slack_text = (
         f"{tag}:bell: *New phone booking via Cherry*\n"
@@ -628,14 +625,18 @@ async def hold_room(request: Request):
         f"*Room:* {room_label}\n"
         f"*Dates:* {checkin_str} → {checkout_str}\n"
         f"*Guests:* {num_guests}\n"
-        f"{res_line}\n"
+        f"{cb_line}\n"
         f"*Action:* {action}"
     )
 
     phone_calls_webhook = os.environ.get("SLACK_PHONE_CALLS_WEBHOOK_URL", "").strip()
     try:
         if phone_calls_webhook:
-            requests.post(phone_calls_webhook, json={"text": slack_text, "username": "Cherry", "icon_emoji": ":telephone_receiver:"}, timeout=10).raise_for_status()
+            requests.post(
+                phone_calls_webhook,
+                json={"text": slack_text, "username": "Cherry", "icon_emoji": ":telephone_receiver:"},
+                timeout=10,
+            ).raise_for_status()
         else:
             logger.warning("SLACK_PHONE_CALLS_WEBHOOK_URL not set — skipping hold_room Slack post")
     except Exception as exc:
@@ -643,7 +644,7 @@ async def hold_room(request: Request):
 
     return JSONResponse({
         "result": (
-            "I've noted your reservation request. "
+            "I've held that room for you. "
             "Our team will call you within the hour to confirm and arrange payment."
         )
     })
