@@ -1,6 +1,6 @@
 # Cherry System Prompt Notes
-Source of truth for additions to Cherry's Retell system prompt and knowledge base.
-Apply these manually in the Retell dashboard.
+Source of truth for Cherry's Retell system prompt and knowledge base additions.
+Last applied: 25 Apr 2026 via Retell API.
 
 ---
 
