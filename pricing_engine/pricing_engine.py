@@ -467,10 +467,10 @@ class PricingEngine:
 
         if rs == "SOLD_OUT":
             return 1.35, "regional SOLD_OUT"
-        elif rs == "CRITICAL":
-            return 1.20, "regional CRITICAL"
         elif rs == "HIGH":
-            return 1.10, "regional HIGH"
+            # 99% of Daylesford unavailable — strong demand signal, push hard.
+            # Evening drop logic handles the case where we don't sell out by day's end.
+            return 1.25, "regional HIGH (99% unavailable)"
         else:
             # NORMAL: compare our planned rate vs comp average
             comp_avg = sig.get("comp_avg")
