@@ -327,8 +327,12 @@ class HousekeepingRoster:
         )
         sep = "─" * 82
 
+        row_div = "- " * 41  # dashed divider between rows
+
         table_lines = [header, sep]
-        for r in rows:
+        for i, r in enumerate(rows):
+            if i > 0:
+                table_lines.append(row_div)
             date_label = r["date"].strftime("%a %d %b")
             n_to, n_co = r["n_to"], r["n_co"]
             to_str = f"{n_to} TO"
