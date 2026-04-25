@@ -315,20 +315,17 @@ class HousekeepingRoster:
         start_label = self.start_date.strftime("%a %d %b")
         lines = [
             f"*HSMI Housekeeping Roster — 14 days from {start_label}*",
-            "",
         ]
 
         for r in rows:
             date_label = r["date"].strftime("%a %d %b")
-            lines.append(
-                f"📅 {date_label:<11}  {r['n_to']:>2} turnovers  {r['n_co']:>2} checkouts   "
-                f"{r['roster']:<32}  {r['flag']}"
-            )
+            lines.append("")
+            lines.append(f"📅 *{date_label}* — {r['roster']}")
+            lines.append(f"   {r['n_to']} turnovers · {r['n_co']} checkouts · {r['flag']}")
 
         lines += [
             "",
-            "_Capacity: Mon 9 TO/18 cleans | Tue 4/4 | Wed/Thu 4/4 (Jodie only) | Fri 9/10 | Sat 9/14 | Sun 6/12_",
-            "_TO = turnovers (10am–2pm) | Jodie = housekeeping & laundry only | Dwayne = cleans first, maintenance with spare time_",
+            "_TO = turnovers (10am–2pm window) | Jodie = HK & laundry only | Dwayne = cleans first, maintenance after_",
         ]
 
         return "\n".join(lines)
