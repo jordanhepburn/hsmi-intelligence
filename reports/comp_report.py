@@ -179,16 +179,17 @@ def _query_booking_night(
 ) -> dict:
     """Single Booking.com search for one night. Returns raw API response."""
     params = {
-        "checkin_date":       checkin.strftime("%Y-%m-%d"),
-        "checkout_date":      (checkin + timedelta(days=1)).strftime("%Y-%m-%d"),
-        "adults_number":      "2",
-        "room_number":        "1",
+        "arrival_date":       checkin.strftime("%Y-%m-%d"),
+        "departure_date":     (checkin + timedelta(days=1)).strftime("%Y-%m-%d"),
+        "adults":             "2",
+        "room_qty":           "1",
         "currency_code":      "AUD",
         "languagecode":       "en-us",
         "units":              "metric",
         "page_number":        "0",
         "filter_by_currency": "AUD",
         "locale":             "en-gb",
+        "search_type":        "CITY",
     }
     if dest_id:
         params["dest_id"]   = dest_id
@@ -225,13 +226,14 @@ def _process_night(data: dict) -> dict:
       reference       — {keyword: {name, price_str, price_num, sold}}
       comp_avg / comp_count / hsmi_vs_comp_pct
     """
-    meta = data.get("data", data)
-    if isinstance(meta, dict):
-        search_meta    = meta.get("search_metadata", {})
-        props          = meta.get("hotels", meta.get("properties", []))
-    else:
-        search_meta    = {}
-        props          = meta if isinstance(meta, list) else []
+    # Top-level structure: {status, message, timestamp, data}
+    # data structure: {hotels: [...], meta: {...}, appear: [...]}
+    # Each hotel: {hotel_id, accessibilityLabel, property: {...}}
+    payload     = data.get("data", data)
+    search_meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+    props       = payload.get("hotels", []) if isinstance(payload, dict) else []
+
+    logger.info("  API returned %d hotel records", len(props))
 
     # Booking.com sold-out banner — 99% = SOLD_OUT
     banner_pct: Optional[float] = None
@@ -246,8 +248,8 @@ def _process_night(data: dict) -> dict:
     total = len(props)
     sold_out_count = 0
     for p in props:
-        avail = p.get("available_rooms", p.get("availableRooms"))
-        if (avail is not None and int(avail) == 0) or p.get("soldout") or p.get("is_sold_out"):
+        prop = p.get("property", p)
+        if prop.get("soldout"):
             sold_out_count += 1
 
     available = total - sold_out_count
@@ -276,17 +278,19 @@ def _process_night(data: dict) -> dict:
     reference: dict[str, dict] = {}
 
     for p in props:
-        name = p.get("hotel_name", p.get("name", ""))
+        prop = p.get("property", p)  # all useful fields live in the "property" sub-object
+        name = prop.get("name", "")
         nl   = name.lower()
 
+        pb        = prop.get("priceBreakdown", {})
         price_raw = (
-            p.get("min_total_price")
-            or p.get("price")
-            or p.get("composite_price_breakdown", {}).get("gross_amount_per_night", {}).get("value")
+            pb.get("grossPrice", {}).get("value")
+            or pb.get("allInclusivePrice")
+            or prop.get("min_total_price")
+            or prop.get("price")
         )
         price_num = _parse_price(price_raw)
-        avail = p.get("available_rooms", p.get("availableRooms"))
-        sold  = (avail is not None and int(avail) == 0) or bool(p.get("soldout") or p.get("is_sold_out"))
+        sold      = bool(prop.get("soldout"))
         price_str = "SOLD" if sold else (f"${price_num:.0f}" if price_num else "N/A")
 
         category, key = _classify(nl)

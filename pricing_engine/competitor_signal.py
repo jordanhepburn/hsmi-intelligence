@@ -201,16 +201,17 @@ def _search_booking(
     Returns the raw API response dict.
     """
     params = {
-        "checkin_date":    checkin.strftime("%Y-%m-%d"),
-        "checkout_date":   checkout.strftime("%Y-%m-%d"),
-        "adults_number":   "2",
-        "room_number":     "1",
+        "arrival_date":    checkin.strftime("%Y-%m-%d"),
+        "departure_date":  checkout.strftime("%Y-%m-%d"),
+        "adults":          "2",
+        "room_qty":        "1",
         "currency_code":   "AUD",
         "languagecode":    "en-us",
         "units":           "metric",
         "page_number":     "0",
         "filter_by_currency": "AUD",
         "locale":          "en-gb",
+        "search_type":     "CITY",
     }
 
     if dest_id:
@@ -255,18 +256,18 @@ def _process_booking_response(data: dict) -> dict:
     Returns a dict matching the existing competitor_cache.json schema so the
     pricing engine needs no changes.
     """
-    # Top-level metadata from Booking.com
-    meta = data.get("data", data)
-    if isinstance(meta, dict):
-        search_meta    = meta.get("search_metadata", {})
-        properties_raw = meta.get("hotels", meta.get("properties", []))
-    else:
-        search_meta    = {}
-        properties_raw = meta if isinstance(meta, list) else []
+    # Top-level structure: {status, message, timestamp, data}
+    # data structure: {hotels: [...], meta: {...}, appear: [...]}
+    # Each hotel: {hotel_id, accessibilityLabel, property: {...}}
+    payload        = data.get("data", data)
+    search_meta    = payload.get("meta", {}) if isinstance(payload, dict) else {}
+    properties_raw = payload.get("hotels", []) if isinstance(payload, dict) else []
+
+    logger.info("  API returned %d hotel records", len(properties_raw))
 
     # --- Booking.com sold-out banner ---
-    # `sold_out_percentage` mirrors the top-of-page banner e.g. "98% of rooms
-    # sold in Daylesford". 99% → SOLD_OUT signal.
+    # `sold_out_percentage` in data.meta mirrors the top-of-page banner
+    # e.g. "98% of rooms sold in Daylesford". 99% → SOLD_OUT signal.
     banner_pct: Optional[float] = None
     raw_banner = search_meta.get("sold_out_percentage")
     if raw_banner is not None:
@@ -277,13 +278,12 @@ def _process_booking_response(data: dict) -> dict:
             pass
 
     # --- Property-level availability ---
+    # Each item has a "property" sub-object with name, price, soldout flag.
     total = len(properties_raw)
     sold_out_count = 0
     for p in properties_raw:
-        avail = p.get("available_rooms", p.get("availableRooms"))
-        if avail is not None and int(avail) == 0:
-            sold_out_count += 1
-        elif p.get("soldout") or p.get("is_sold_out"):
+        prop = p.get("property", p)  # fall back to p itself if no sub-object
+        if prop.get("soldout"):
             sold_out_count += 1
 
     available = total - sold_out_count
@@ -326,21 +326,21 @@ def _process_booking_response(data: dict) -> dict:
     found_comp_kws: set[str]        = set()
 
     for p in properties_raw:
-        name = p.get("hotel_name", p.get("name", ""))
+        prop = p.get("property", p)  # all useful fields live in the "property" sub-object
+        name = prop.get("name", "")
         nl   = name.lower()
 
-        # Price: Booking.com API uses min_total_price, price, or gross_amount_per_night
+        # Price: try priceBreakdown.grossPrice first, then common fallbacks
+        pb        = prop.get("priceBreakdown", {})
         price_raw = (
-            p.get("min_total_price")
-            or p.get("price")
-            or p.get("composite_price_breakdown", {}).get("gross_amount_per_night", {}).get("value")
+            pb.get("grossPrice", {}).get("value")
+            or pb.get("allInclusivePrice")
+            or prop.get("min_total_price")
+            or prop.get("price")
         )
         price_num = _parse_price(price_raw)
 
-        sold_tag = ""
-        avail = p.get("available_rooms", p.get("availableRooms"))
-        if (avail is not None and int(avail) == 0) or p.get("soldout") or p.get("is_sold_out"):
-            sold_tag = " [SOLD OUT]"
+        sold_tag = " [SOLD OUT]" if prop.get("soldout") else ""
 
         kind = _classify(nl)
 
