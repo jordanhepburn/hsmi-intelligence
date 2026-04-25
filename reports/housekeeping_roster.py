@@ -364,7 +364,7 @@ class HousekeepingRoster:
                 timeout=15,
             )
             resp.raise_for_status()
-            logger.info("Housekeeping roster posted to Slack #operations")
+            logger.info("Housekeeping roster posted to Slack #api-pricing-engine")
         except requests.RequestException as exc:
             logger.error("Slack post failed: %s — printing to stdout", exc)
             print(message)

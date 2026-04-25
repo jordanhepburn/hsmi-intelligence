@@ -247,6 +247,57 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/test/hold_room")
+async def test_hold_room():
+    """
+    Diagnostic endpoint — fires a dry-run hold_room with test data and returns
+    the raw Cloudbeds response. Does NOT post to Slack.
+    GET https://<railway-url>/test/hold_room
+    """
+    from datetime import date, timedelta
+    from config import BASE_RATE_IDS
+    from cloudbeds_client import CloudbedsClient
+
+    api_key = (
+        os.environ.get("CHERRY_CLOUDBEDS_API_KEY", "").strip()
+        or os.environ.get("CLOUDBEDS_API_KEY", "")
+    )
+    property_id = os.environ.get("CLOUDBEDS_PROPERTY_ID", "")
+
+    checkin  = (date.today() + timedelta(days=30)).isoformat()
+    checkout = (date.today() + timedelta(days=31)).isoformat()
+    room_code = "TWI"
+    cfg = ROOM_TYPE_ID_MAP[room_code]
+
+    payload = {
+        "startDate":             checkin,
+        "endDate":               checkout,
+        "guestFirstName":        "Test",
+        "guestLastName":         "Cherry",
+        "guestEmail":            "",
+        "guestPhone":            "0400000000",
+        "guestCountry":          "AU",
+        "rooms[0][roomTypeID]":  cfg["id"],
+        "rooms[0][rateID]":      BASE_RATE_IDS[room_code],
+        "rooms[0][quantity]":    "1",
+        "adults[0][roomTypeID]": cfg["id"],
+        "adults[0][quantity]":   "1",
+        "adults[0][adults]":     "1",
+        "children[0][roomTypeID]": cfg["id"],
+        "children[0][quantity]": "1",
+        "children[0][children]": "0",
+        "sendEmailConfirmation": "false",
+        "estimatedArrivalTime":  "15:00",
+    }
+
+    try:
+        client = CloudbedsClient(api_key=api_key, property_id=property_id)
+        resp   = client._request("POST", "postReservation", data=payload)
+        return {"payload_sent": payload, "cloudbeds_response": resp}
+    except Exception as exc:
+        return {"payload_sent": payload, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # 1. check_availability
 # ---------------------------------------------------------------------------
@@ -508,11 +559,10 @@ async def hold_room(request: Request):
             rate_id      = BASE_RATE_IDS.get(room_code, "")
             property_id  = os.environ.get("CLOUDBEDS_PROPERTY_ID", "").strip()
 
-            # Payload format confirmed working via API testing 25 Apr 2026.
-            # Must be form-encoded (data=), not JSON.
+            # Payload must be form-encoded (data=), not JSON.
+            # propertyID is intentionally omitted — _request() adds it to query params.
+            # sourceID is omitted — "s-3-1" caused "channel not enabled" errors.
             payload = {
-                "propertyID":               property_id,
-                "sourceID":                 "s-3-1",        # Phone, primary source
                 "startDate":                checkin_str,
                 "endDate":                  checkout_str,
                 "guestFirstName":           first_name,
@@ -520,8 +570,6 @@ async def hold_room(request: Request):
                 "guestEmail":               guest_email or "",
                 "guestPhone":               guest_phone or "",
                 "guestCountry":             "AU",
-                "guestZip":                 "3461",
-                "paymentMethod":            "cash",
                 "rooms[0][roomTypeID]":     room_type_id,
                 "rooms[0][rateID]":         rate_id,
                 "rooms[0][quantity]":       "1",
@@ -531,7 +579,7 @@ async def hold_room(request: Request):
                 "children[0][roomTypeID]":  room_type_id,
                 "children[0][quantity]":    "1",
                 "children[0][children]":    "0",
-                "sendEmailConfirmation":    "true",
+                "sendEmailConfirmation":    "false",
                 "estimatedArrivalTime":     "15:00",
             }
             logger.info("postReservation payload: %s", payload)
@@ -563,18 +611,23 @@ async def hold_room(request: Request):
     veronica_id = os.environ.get("VERONICA_SLACK_ID", "").strip()
     tag         = f"<@{veronica_id}> " if veronica_id else ""
 
-    res_line = f"*Reservation ID:* {reservation_id}" if reservation_id else f"*Cloudbeds:* {cb_status}"
+    if reservation_id:
+        res_line = f"*Reservation ID:* {reservation_id} ✅ Created in Cloudbeds"
+        action   = "Call guest to confirm and take payment"
+    else:
+        res_line = f"*Cloudbeds:* {cb_status} ⚠️ Create reservation manually"
+        action   = "1. Create reservation in Cloudbeds NOW  2. Call guest to take payment"
 
     slack_text = (
-        f"{tag}:bell: *New booking request from Cherry*\n"
+        f"{tag}:bell: *New phone booking via Cherry*\n"
         f"*Guest:* {guest_name}\n"
         f"*Phone:* {guest_phone or 'not provided'}\n"
         f"*Email:* {guest_email or 'not provided'}\n"
-        f"*Dates:* {checkin_str} to {checkout_str}\n"
         f"*Room:* {room_label}\n"
+        f"*Dates:* {checkin_str} → {checkout_str}\n"
         f"*Guests:* {num_guests}\n"
         f"{res_line}\n"
-        f"*Action required:* confirm and take payment"
+        f"*Action:* {action}"
     )
 
     phone_calls_webhook = os.environ.get("SLACK_PHONE_CALLS_WEBHOOK_URL", "").strip()
