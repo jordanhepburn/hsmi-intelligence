@@ -96,24 +96,31 @@ class HousekeepingRoster:
         if not self.webhook:
             logger.warning("SLACK_PRICING_WEBHOOK_URL not set — report will print to stdout only")
 
-        self.today = datetime.now(ZoneInfo("Australia/Melbourne")).date()
+        now = datetime.now(ZoneInfo("Australia/Melbourne"))
+        self.today = now.date()
+        # If running at or after 2pm, today's housekeeping is already underway —
+        # start the roster from tomorrow instead.
+        if now.hour >= 14:
+            self.start_date = self.today + timedelta(days=1)
+        else:
+            self.start_date = self.today
 
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        logger.info("=== HSMI Housekeeping Roster — %s ===", self.today)
+        logger.info("=== HSMI Housekeeping Roster — starting %s ===", self.start_date)
 
-        today_str = self.today.strftime("%Y-%m-%d")
-        end_date  = self.today + timedelta(days=LOOKAHEAD)
+        start_str = self.start_date.strftime("%Y-%m-%d")
+        end_date  = self.start_date + timedelta(days=LOOKAHEAD)
         end_str   = end_date.strftime("%Y-%m-%d")
 
         # Step 1: Collect reservation IDs covering the window
-        logger.info("Fetching checkout reservation IDs %s → %s", today_str, end_str)
-        checkout_ids = self._fetch_res_ids(checkOutFrom=today_str, checkOutTo=end_str)
-        logger.info("Fetching checkin reservation IDs %s → %s", today_str, end_str)
-        checkin_ids  = self._fetch_res_ids(checkInFrom=today_str,  checkInTo=end_str)
+        logger.info("Fetching checkout reservation IDs %s → %s", start_str, end_str)
+        checkout_ids = self._fetch_res_ids(checkOutFrom=start_str, checkOutTo=end_str)
+        logger.info("Fetching checkin reservation IDs %s → %s", start_str, end_str)
+        checkin_ids  = self._fetch_res_ids(checkInFrom=start_str,  checkInTo=end_str)
 
         all_ids = checkout_ids | checkin_ids
         logger.info(
@@ -137,9 +144,9 @@ class HousekeepingRoster:
                 end_d      = str(assignment.get("endDate") or "")
                 if not room_id:
                     continue
-                if today_str <= start_d <= end_str:
+                if start_str <= start_d <= end_str:
                     checkins[start_d].add(room_id)
-                if today_str <= end_d <= end_str:
+                if start_str <= end_d <= end_str:
                     checkouts[end_d].add(room_id)
 
         logger.info(
@@ -152,7 +159,7 @@ class HousekeepingRoster:
         sunday_deferrals = 0
 
         for i in range(LOOKAHEAD):
-            d     = self.today + timedelta(days=i)
+            d     = self.start_date + timedelta(days=i)
             d_str = d.strftime("%Y-%m-%d")
             dow   = d.weekday()  # 0=Mon … 6=Sun
 
@@ -305,9 +312,9 @@ class HousekeepingRoster:
     # ------------------------------------------------------------------
 
     def _build_message(self, rows: list[dict]) -> str:
-        today_label = self.today.strftime("%a %d %b")
+        start_label = self.start_date.strftime("%a %d %b")
         lines = [
-            f"*HSMI Housekeeping Roster — 14 days from {today_label}*",
+            f"*HSMI Housekeeping Roster — 14 days from {start_label}*",
             "",
         ]
 
