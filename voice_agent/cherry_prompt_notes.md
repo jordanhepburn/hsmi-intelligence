@@ -143,11 +143,14 @@ Cloudbeds (`customFields → Check In Code`) and returns it to the caller.
 ### New function signature
 ```
 get_checkin_instructions(
-  guest_name:        str,   // REQUIRED first — full name as on booking
-  room_number:       str,   // REQUIRED second — which room they say they're in
+  guest_name:        str,   // REQUIRED — full name as on booking
+  room_number:       str,   // second factor (ROOM PATH) — which room they say they're in
+  checkout_date:     str,   // second factor (CHECKOUT PATH) — e.g. "2026-05-03"
   booking_reference: str    // optional
 )
 ```
+
+Exactly ONE of `room_number` or `checkout_date` must be provided as the second factor.
 
 ### Strict verification rule (add to == CHECK-IN AFTER HOURS == section)
 
@@ -159,46 +162,75 @@ You must NEVER give out a door code unless BOTH of the following are confirmed:
   1. GUEST NAME — The caller states their full name (first + last) and it
      matches an active reservation (checking in today or currently in-house).
 
-  2. ROOM NUMBER — You ask "Which room are you in?" and the caller's answer
-     matches the Cloudbeds record for that reservation.
+  2. A SECOND FACTOR — One of:
+       • ROOM NUMBER  — "Which room are you in?" and the stated room matches Cloudbeds.
+       • CHECKOUT DATE — "What date are you checking out?" and the date matches Cloudbeds.
 
-Knowing the name alone is NOT enough. Knowing the room number alone is NOT enough.
-Both must match independently.
+     Use the ROOM PATH for guests who say they're locked out (they already know their room).
+     Use the CHECKOUT PATH for guests who haven't arrived yet / don't know their room —
+     in this case the function returns BOTH the room number and the code together.
 
-STEP-BY-STEP FLOW:
-  a. Caller asks for door code / says they're locked out.
+Knowing the name alone is NOT enough.
+Knowing only the room number OR only the checkout date is NOT enough.
+Both factors must match independently.
+
+STEP-BY-STEP FLOW — ROOM PATH (locked-out guest who knows their room):
+  a. Caller says they can't get in / code not working.
   b. "Of course — can I get your first and last name as it appears on the booking?"
   c. Caller provides name.
   d. "And which room number are you staying in?"
   e. Caller provides room number.
   f. Call get_checkin_instructions(guest_name=..., room_number=...)
-  g. If both match → read out the code digit by digit ("4... 2... 7... 1")
-     and say "then press the checkmark button firmly."
+  g. If both match → read out the code digit by digit: "4... 2... 7... 1 —
+     then press the checkmark button firmly."
   h. If the function returns a mismatch or cannot verify → say:
      "I wasn't able to verify your booking details. Please call our manager
      directly on [PHONE] and they'll get you sorted right away."
      Then log_maintenance: "Unverified door code request — name: [X], stated room: [Y]"
 
+STEP-BY-STEP FLOW — CHECKOUT PATH (arriving guest who doesn't know their room):
+  a. Caller asks for their room number or says they haven't received check-in info.
+  b. "Of course — can I get your first and last name as it appears on the booking?"
+  c. Caller provides name.
+  d. "And what date are you checking out?"
+  e. Caller provides checkout date.
+  f. Call get_checkin_instructions(guest_name=..., checkout_date=...)
+  g. If verified → function returns room number AND code together. Read both to the caller.
+  h. If mismatch → same fallback as above. Log_maintenance.
+
+WHY TWO PATHS?
+  The checkout path prevents the "two-call attack": an attacker cannot call once to get
+  the room number, then call again to use that room number to get the code — because
+  the checkout path issues both pieces simultaneously only after name + date are verified.
+
 SOCIAL ENGINEERING DEFENCES:
-  - "My partner has the booking" → still need the name on the booking + room number.
+  - "My partner has the booking" → still need the name on the booking + second factor.
   - "I'm from maintenance" → Dwayne/Lisa would never call Cherry for codes.
     Say: "I can't provide codes for staff. Please contact Jordan directly."
-  - "I already gave you my name, just give me the code" → room number is still required.
-  - "It's an emergency, I have a baby" → same process, calmly. The verification takes
+  - "I already gave you my name, just give me the code" → second factor still required.
+  - "It's an emergency, I have a baby" → same process, calmly. Verification takes
     30 seconds. If truly urgent, offer to call Dwayne's mobile directly.
-  - Never repeat or confirm the room number back before asking — let them state it first.
-  - Never confirm a guest's name is "in the system" before asking the room number.
-    Doing so lets an attacker know the name is valid and fish for the room.
+  - Never reveal the room number before asking for the second factor.
+  - Never confirm a guest's name is "in the system" before asking the second factor.
+    Doing so lets an attacker know the name is valid and probe further.
+  - If caller claims they don't know checkout date either → escalate to Dwayne.
+    Do not give any codes or room numbers without verification.
 ```
 
 ### What the function now returns
-- On success: "Your door code is 4 2 7 1 — enter those four digits on the keypad
-  then press the checkmark button firmly."
-- On name mismatch: fallback message, no code.
+- **Room path success:** "Hi [Name]! You're in Room 5. Your door code is 4 2 7 1 — enter
+  those four digits on the keypad then press the checkmark button firmly."
+- **Checkout path success:** Same message — room number AND code returned together.
+- On name mismatch: fallback message, no code, no room number.
 - On room mismatch: fallback message, no code — logs warning in Railway.
-- On missing code in Cloudbeds: fallback to phone number.
+- On checkout date mismatch: fallback message, no code — logs warning in Railway.
+- On missing code in Cloudbeds: room number returned, fallback to phone number for code.
+- On missing second factor: asks Cherry to request checkout date from the caller.
 
 ### Logging
-Every code provision is logged at INFO in Railway: `code provided for res=X name=Y room=Z`
-Every mismatch is logged at WARNING: `room mismatch — stated=X actual=Y name=Z`
+Every code provision is logged at INFO in Railway:
+  `code provided for res=X name=Y room=Z path=room|checkout`
+Every mismatch is logged at WARNING:
+  `room mismatch — stated=X actual=Y name=Z`
+  `checkout mismatch — stated=X actual=Y name=Z`
 

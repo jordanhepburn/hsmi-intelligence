@@ -807,70 +807,116 @@ async def get_checkin_instructions(request: Request):
 
     Security model — TWO independent factors required before code is returned:
       1. Guest name must match a current reservation (check-in today OR in-house).
-      2. Caller must confirm the room number — Cherry asks "which room are you in?"
-         and the stated room must match the Cloudbeds record.
+      2. ONE of the following (caller's choice):
+           a. ROOM PATH  — Caller states their room number and it matches Cloudbeds.
+                           Code is returned. (Used by guests who already know their room.)
+           b. CHECKOUT PATH — Caller states their check-out date and it matches Cloudbeds.
+                           Room number AND code are both returned together.
+                           (Used by arriving guests who don't yet know their room.)
 
-    This prevents social engineering: knowing a guest's name alone is not enough.
-    A caller who doesn't know the room number cannot get the code.
+    The CHECKOUT PATH prevents the two-call attack: an attacker cannot learn the room
+    number in one call and then use it in a second call, because both are issued
+    simultaneously only after name + checkout_date are verified.
 
-    The code itself comes from the Cloudbeds customField 'Check In Code' which is
-    set per-reservation and contains the 4-digit keypad combination.
+    If neither room_number nor checkout_date is supplied, Cherry asks for the
+    checkout_date (softer ask for arriving guests who may not know their room yet).
+
+    The code comes from Cloudbeds customField 'Check In Code' (4-digit keypad combo).
     """
     body              = _args(await request.json())
     guest_name        = str(body.get("guest_name", "") or "").strip()
-    stated_room       = str(body.get("room_number", "") or "").strip()   # caller-stated room
+    stated_room       = str(body.get("room_number", "") or "").strip()
+    checkout_date_raw = str(body.get("checkout_date", "") or "").strip()
     booking_reference = str(body.get("booking_reference", "") or "").strip()
 
     today_str     = date.today().strftime("%Y-%m-%d")
     tomorrow_str  = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
 
+    # ------------------------------------------------------------------
+    # Factor 1: name required
+    # ------------------------------------------------------------------
     if not guest_name:
         return JSONResponse({
             "result": "NEED_NAME",
             "instruction": (
-                "Please ask the caller: 'Can I get your first and last name as it appears on the booking?'"
+                "Please ask the caller: 'Can I get your first and last name "
+                "as it appears on the booking?'"
             )
         })
 
-    if not stated_room:
+    # ------------------------------------------------------------------
+    # Factor 2: need room number OR checkout date
+    # ------------------------------------------------------------------
+    if not stated_room and not checkout_date_raw:
         return JSONResponse({
-            "result": "NEED_ROOM",
+            "result": "NEED_SECOND_FACTOR",
             "instruction": (
-                "Please ask the caller: 'And which room number are you staying in?' "
-                "Do not provide the code until they confirm their room number."
+                "Please ask the caller: 'And what date are you checking out?' "
+                "(If they know their room number, you can ask for that instead.) "
+                "Do not provide the room number or door code until a second factor is confirmed."
             )
         })
+
+    # ------------------------------------------------------------------
+    # Determine which path we're on
+    # ------------------------------------------------------------------
+    use_checkout_path = bool(checkout_date_raw) and not stated_room
+
+    # Normalise checkout_date_raw to YYYY-MM-DD if supplied
+    stated_checkout_str: str = ""
+    if checkout_date_raw:
+        try:
+            # Accept ISO format directly
+            stated_checkout_str = _parse_date(checkout_date_raw).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            return JSONResponse({
+                "result": (
+                    "I couldn't understand that check-out date. "
+                    "Could you say it as, for example, the fifteenth of June?"
+                )
+            })
 
     try:
-        client    = _cb()
+        client     = _cb()
         name_lower = guest_name.lower()
         name_parts = [p for p in name_lower.split() if len(p) > 1]
 
-        # Search both today check-ins AND current in-house guests (checked in before today)
-        # in-house = checked in on or before today, checking out tomorrow or later
-        candidate_params_list = [
-            # Today's arrivals
-            {"checkInFrom": today_str, "checkInTo": today_str},
-            # In-house guests (already checked in, not yet checked out)
-            {"checkInTo": today_str, "checkOutFrom": tomorrow_str},
-        ]
+        # ------------------------------------------------------------------
+        # Search for the reservation that matches this guest
+        # ------------------------------------------------------------------
         if booking_reference:
             candidate_params_list = [{"reservationID": booking_reference}]
+        elif use_checkout_path:
+            # Checkout-date path: search reservations checking out on the stated date
+            # (covers both arriving-today and already-in-house guests whose checkout matches)
+            candidate_params_list = [
+                {"checkOutFrom": stated_checkout_str, "checkOutTo": stated_checkout_str},
+            ]
+        else:
+            # Room-number path: standard arrival + in-house search
+            candidate_params_list = [
+                {"checkInFrom": today_str, "checkInTo": today_str},
+                {"checkInTo": today_str, "checkOutFrom": tomorrow_str},
+            ]
 
-        matched_res_id:  str | None = None
+        matched_res_id:   str | None = None
         matched_res_name: str = ""
 
         for params in candidate_params_list:
             resp  = client._get("getReservations", params=params)
             data  = resp.get("data", [])
-            items = data if isinstance(data, list) else data.get("reservations", []) if isinstance(data, dict) else []
+            items = (
+                data if isinstance(data, list)
+                else data.get("reservations", []) if isinstance(data, dict)
+                else []
+            )
             for res in items:
                 if _is_cancelled(res):
                     continue
                 res_id = str(res.get("reservationID") or "")
                 if not res_id:
                     continue
-                full = (res.get("guestName") or res.get("fullName") or "").strip()
+                full       = (res.get("guestName") or res.get("fullName") or "").strip()
                 full_lower = full.lower()
                 if name_lower in full_lower or any(p in full_lower for p in name_parts):
                     matched_res_id   = res_id
@@ -881,8 +927,8 @@ async def get_checkin_instructions(request: Request):
 
         if not matched_res_id:
             logger.warning(
-                "get_checkin_instructions: no match for name=%r room=%r",
-                guest_name, stated_room,
+                "get_checkin_instructions: no match for name=%r room=%r checkout=%r",
+                guest_name, stated_room, stated_checkout_str,
             )
             return JSONResponse({
                 "result": (
@@ -892,14 +938,16 @@ async def get_checkin_instructions(request: Request):
                 )
             })
 
-        # Fetch full reservation detail — room number + check-in code
+        # ------------------------------------------------------------------
+        # Fetch full reservation detail — room + code
+        # ------------------------------------------------------------------
         detail_resp = client._get("getReservation", params={"reservationID": matched_res_id})
         detail      = detail_resp.get("data", detail_resp)
 
-        # --- Room number from Cloudbeds ---
+        # Room number from Cloudbeds
         actual_room_num = _room_number_from_detail(detail)
 
-        # --- Check-in code from customFields ---
+        # Check-in code from customFields
         checkin_code: str | None = None
         raw_code_field: str = ""
         for cf in (detail.get("customFields") or []):
@@ -908,49 +956,77 @@ async def get_checkin_instructions(request: Request):
                 break
 
         if raw_code_field:
-            # Format is typically "Room X: NNNN" — extract just the 4-digit code
-            import re as _re
-            m = _re.search(r'\b(\d{4})\b', raw_code_field)
+            m = re.search(r'\b(\d{4})\b', raw_code_field)
             if m:
                 checkin_code = m.group(1)
 
-        # --- Security check: stated room must match Cloudbeds record ---
-        # Normalise both to just the digit(s): "Room 5", "5", "room 5" → "5"
+        # Normalise room numbers to digits only, strip leading zeros
         def _norm_room(s: str) -> str:
-            import re as _re2
-            digits = _re2.sub(r'[^\d]', '', s)
+            digits = re.sub(r'[^\d]', '', s)
             return digits.lstrip("0") or digits
 
         actual_norm = _norm_room(actual_room_num or "")
-        stated_norm = _norm_room(stated_room)
 
-        if actual_norm and stated_norm and actual_norm != stated_norm:
-            logger.warning(
-                "get_checkin_instructions: room mismatch — stated=%r actual=%r name=%r res=%s",
-                stated_room, actual_room_num, guest_name, matched_res_id,
-            )
-            return JSONResponse({
-                "result": (
-                    "I wasn't able to verify your booking details. "
-                    "Please double-check your room number, or call us on "
-                    f"{_PHONE} and we'll get you sorted straight away."
+        # ------------------------------------------------------------------
+        # ROOM PATH — verify stated room matches Cloudbeds
+        # ------------------------------------------------------------------
+        if not use_checkout_path:
+            stated_norm = _norm_room(stated_room)
+            if actual_norm and stated_norm and actual_norm != stated_norm:
+                logger.warning(
+                    "get_checkin_instructions: room mismatch — stated=%r actual=%r name=%r res=%s",
+                    stated_room, actual_room_num, guest_name, matched_res_id,
                 )
-            })
+                return JSONResponse({
+                    "result": (
+                        "I wasn't able to verify your booking details. "
+                        "Please double-check your room number, or call us on "
+                        f"{_PHONE} and we'll get you sorted straight away."
+                    )
+                })
 
-        # --- All checks passed — return room + code ---
+        # ------------------------------------------------------------------
+        # CHECKOUT PATH — verify stated checkout date matches Cloudbeds
+        # (The search was already filtered to stated_checkout_str so a match
+        #  here is already date-verified. Double-check for belt-and-braces.)
+        # ------------------------------------------------------------------
+        if use_checkout_path:
+            actual_checkout = str(
+                detail.get("checkoutDate") or
+                detail.get("endDate") or
+                detail.get("checkout_date") or ""
+            ).strip()[:10]  # keep YYYY-MM-DD only
+            if actual_checkout and actual_checkout != stated_checkout_str:
+                logger.warning(
+                    "get_checkin_instructions: checkout mismatch — stated=%r actual=%r name=%r res=%s",
+                    stated_checkout_str, actual_checkout, guest_name, matched_res_id,
+                )
+                return JSONResponse({
+                    "result": (
+                        "I wasn't able to verify your booking details — "
+                        "the check-out date doesn't match our records. "
+                        f"Please call us on {_PHONE} and we'll get you sorted."
+                    )
+                })
+
+        # ------------------------------------------------------------------
+        # All checks passed — build response
+        # ------------------------------------------------------------------
+        first_name = matched_res_name.split()[0] if matched_res_name else "there"
+
         if checkin_code and actual_room_num:
+            code_spoken = " ".join(checkin_code)   # "4 2 7 1"
             result_msg = (
-                f"Hi {matched_res_name.split()[0] if matched_res_name else 'there'}! "
+                f"Hi {first_name}! "
                 f"You're in Room {actual_room_num}. "
-                f"Your door code is {' '.join(checkin_code)} — "
+                f"Your door code is {code_spoken} — "
                 "enter those four digits on the keypad then press the checkmark button firmly. "
                 "The light should flash green and the door will click open. "
                 "Let me know if you have any trouble!"
             )
         elif actual_room_num:
-            # Code missing from Cloudbeds — fall back gracefully
             result_msg = (
-                f"You're in Room {actual_room_num}. "
+                f"Hi {first_name}! You're in Room {actual_room_num}. "
                 "I can see your booking but the door code isn't showing in our system right now. "
                 f"Please call us on {_PHONE} and we'll get you a code immediately."
             )
@@ -961,8 +1037,9 @@ async def get_checkin_instructions(request: Request):
             )
 
         logger.info(
-            "get_checkin_instructions: code provided for res=%s name=%r room=%s",
+            "get_checkin_instructions: code provided for res=%s name=%r room=%s path=%s",
             matched_res_id, guest_name, actual_room_num,
+            "checkout" if use_checkout_path else "room",
         )
         return JSONResponse({"result": result_msg})
 
