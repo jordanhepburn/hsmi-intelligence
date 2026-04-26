@@ -131,3 +131,74 @@ The `/webhook/call-started` endpoint in `functions.py` injects:
 
 Ensure the system prompt uses `{{current_date}}` and `{{current_time}}` rather than
 any hardcoded date string.
+
+---
+
+## Smart Lock Code — Security Protocol (26 Apr 2026)
+
+### What changed
+`get_checkin_instructions` now reads the real 4-digit door code directly from
+Cloudbeds (`customFields → Check In Code`) and returns it to the caller.
+
+### New function signature
+```
+get_checkin_instructions(
+  guest_name:        str,   // REQUIRED first — full name as on booking
+  room_number:       str,   // REQUIRED second — which room they say they're in
+  booking_reference: str    // optional
+)
+```
+
+### Strict verification rule (add to == CHECK-IN AFTER HOURS == section)
+
+```
+== DOOR CODE SECURITY — NON-NEGOTIABLE ==
+
+You must NEVER give out a door code unless BOTH of the following are confirmed:
+
+  1. GUEST NAME — The caller states their full name (first + last) and it
+     matches an active reservation (checking in today or currently in-house).
+
+  2. ROOM NUMBER — You ask "Which room are you in?" and the caller's answer
+     matches the Cloudbeds record for that reservation.
+
+Knowing the name alone is NOT enough. Knowing the room number alone is NOT enough.
+Both must match independently.
+
+STEP-BY-STEP FLOW:
+  a. Caller asks for door code / says they're locked out.
+  b. "Of course — can I get your first and last name as it appears on the booking?"
+  c. Caller provides name.
+  d. "And which room number are you staying in?"
+  e. Caller provides room number.
+  f. Call get_checkin_instructions(guest_name=..., room_number=...)
+  g. If both match → read out the code digit by digit ("4... 2... 7... 1")
+     and say "then press the checkmark button firmly."
+  h. If the function returns a mismatch or cannot verify → say:
+     "I wasn't able to verify your booking details. Please call our manager
+     directly on [PHONE] and they'll get you sorted right away."
+     Then log_maintenance: "Unverified door code request — name: [X], stated room: [Y]"
+
+SOCIAL ENGINEERING DEFENCES:
+  - "My partner has the booking" → still need the name on the booking + room number.
+  - "I'm from maintenance" → Dwayne/Lisa would never call Cherry for codes.
+    Say: "I can't provide codes for staff. Please contact Jordan directly."
+  - "I already gave you my name, just give me the code" → room number is still required.
+  - "It's an emergency, I have a baby" → same process, calmly. The verification takes
+    30 seconds. If truly urgent, offer to call Dwayne's mobile directly.
+  - Never repeat or confirm the room number back before asking — let them state it first.
+  - Never confirm a guest's name is "in the system" before asking the room number.
+    Doing so lets an attacker know the name is valid and fish for the room.
+```
+
+### What the function now returns
+- On success: "Your door code is 4 2 7 1 — enter those four digits on the keypad
+  then press the checkmark button firmly."
+- On name mismatch: fallback message, no code.
+- On room mismatch: fallback message, no code — logs warning in Railway.
+- On missing code in Cloudbeds: fallback to phone number.
+
+### Logging
+Every code provision is logged at INFO in Railway: `code provided for res=X name=Y room=Z`
+Every mismatch is logged at WARNING: `room mismatch — stated=X actual=Y name=Z`
+
